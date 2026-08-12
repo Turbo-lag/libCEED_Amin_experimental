@@ -259,6 +259,8 @@ struct CeedQFunction_private {
   CeedQFunctionField  *output_fields;
   CeedInt              num_input_fields, num_output_fields;
   CeedQFunctionUser    function;
+  CeedQFunctionUser    assembly_function;
+  bool                 assembly_data_grad_in_value_out_zero;
   CeedInt              user_flop_estimate;
   const char          *user_source;
   const char          *source_path;
@@ -362,6 +364,7 @@ struct CeedOperator_private {
   int (*LinearAssemble)(CeedOperator, CeedVector);
   int (*LinearAssembleSingle)(CeedOperator, CeedInt, CeedVector);
   int (*LinearAssembleSingleBlock)(CeedOperator, CeedInt, CeedInt, CeedInt, CeedVector);
+  int (*LinearAssembleSingleBlockMapped)(CeedOperator, CeedSize, CeedInt, CeedInt, CeedVector, const CeedInt *, bool *);
   int (*CreateFDMElementInverse)(CeedOperator, CeedOperator *, CeedRequest *);
   int (*Apply)(CeedOperator, CeedVector, CeedVector, CeedRequest *);
   int (*ApplyComposite)(CeedOperator, CeedVector, CeedVector, CeedRequest *);

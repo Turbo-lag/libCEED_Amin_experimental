@@ -841,7 +841,8 @@ int CeedOperatorLinearAssembleQFunctionBuildOrUpdateFallback(CeedOperator op, bo
 
   @ref Developer
 **/
-int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt active_input, CeedInt active_output, CeedVector values) {
+static int CeedOperatorAssembleSingleBlockCore(CeedOperator op, CeedSize offset, CeedInt active_input, CeedInt active_output, CeedVector values,
+                                               const CeedInt entry_map[]) {
   bool is_composite, is_at_points;
 
   CeedCall(CeedOperatorIsComposite(op, &is_composite));
@@ -855,7 +856,13 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
     if (num_elem == 0) return CEED_ERROR_SUCCESS;
   }
 
-  if (op->LinearAssembleSingleBlock) {
+  if (entry_map && op->LinearAssembleSingleBlockMapped) {
+    bool is_supported = false;
+
+    CeedCall(op->LinearAssembleSingleBlockMapped(op, offset, active_input, active_output, values, entry_map, &is_supported));
+    if (is_supported) return CEED_ERROR_SUCCESS;
+  }
+  if (!entry_map && op->LinearAssembleSingleBlock) {
     // Backend version
     CeedCall(op->LinearAssembleSingleBlock(op, offset, active_input, active_output, values));
     return CEED_ERROR_SUCCESS;
@@ -866,7 +873,7 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
     CeedDebug(CeedOperatorReturnCeed(op), "\nFalling back for CeedOperatorAssembleSingle\n");
     CeedCall(CeedOperatorGetFallback(op, &op_fallback));
     if (op_fallback) {
-      CeedCall(CeedOperatorAssembleSingleBlock(op_fallback, offset, active_input, active_output, values));
+      CeedCall(CeedOperatorAssembleSingleBlockCore(op_fallback, offset, active_input, active_output, values, entry_map));
       return CEED_ERROR_SUCCESS;
     }
   }
@@ -970,10 +977,11 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
     // Loop over elements and put in data structure
     // We store B_mat_in, B_mat_out, BTD, elem_mat in row-major order
     CeedTensorContract contract;
-    CeedScalar        *vals, *BTD_mat = NULL, *elem_mat = NULL, *elem_mat_b = NULL;
+    CeedScalar        *vals, *BTD_mat = NULL, *BTD_sum = NULL, *elem_mat = NULL, *elem_mat_b = NULL;
 
     CeedCall(CeedBasisGetTensorContract(basis_in, &contract));
     CeedCall(CeedCalloc(elem_size_out * num_qpts_in * num_eval_modes_in[active_input], &BTD_mat));
+    if (!contract) CeedCall(CeedCalloc(elem_size_out, &BTD_sum));
     CeedCall(CeedCalloc(elem_size_out * elem_size_in, &elem_mat));
     if (elem_rstr_curl_orients_in || elem_rstr_curl_orients_out) CeedCall(CeedCalloc(elem_size_out * elem_size_in, &elem_mat_b));
 
@@ -982,29 +990,35 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
       for (CeedInt comp_in = 0; comp_in < num_comp_in; comp_in++) {
         for (CeedInt comp_out = 0; comp_out < num_comp_out; comp_out++) {
           // Compute B^T*D
-          for (CeedSize n = 0; n < elem_size_out; n++) {
-            for (CeedSize q = 0; q < num_qpts_in; q++) {
-              for (CeedInt e_in = 0; e_in < num_eval_modes_in[active_input]; e_in++) {
-                const CeedSize btd_index = n * (num_qpts_in * num_eval_modes_in[active_input]) + q * num_eval_modes_in[active_input] + e_in;
-                CeedScalar     sum       = 0.0;
+          const CeedInt  num_eval_in  = num_eval_modes_in[active_input];
+          const CeedInt  num_eval_out = num_eval_modes_out[active_output];
+          const CeedSize btd_stride   = num_qpts_in * num_eval_in;
+          for (CeedSize q = 0; q < num_qpts_in; q++) {
+            for (CeedInt e_in = 0; e_in < num_eval_in; e_in++) {
+              const CeedSize row_offset = eval_modes_offsets_in[active_input][e_in] + comp_in;
+              CeedScalar    *btd_values = contract ? &BTD_mat[(q * num_eval_in + e_in) * elem_size_out] : BTD_sum;
 
-                for (CeedInt e_out = 0; e_out < num_eval_modes_out[active_output]; e_out++) {
-                  const CeedSize b_out_index     = (q * num_eval_modes_out[active_output] + e_out) * elem_size_out + n;
-                  const CeedSize row_offset      = eval_modes_offsets_in[active_input][e_in] + comp_in;
-                  const CeedSize eval_mode_index = row_offset * num_output_components + eval_modes_offsets_out[active_output][e_out] + comp_out;
-                  const CeedSize qf_index        = q * layout_qf[0] + eval_mode_index * layout_qf[1] + e * layout_qf[2];
+              for (CeedInt e_out = 0; e_out < num_eval_out; e_out++) {
+                const CeedSize    eval_mode_index = row_offset * num_output_components + eval_modes_offsets_out[active_output][e_out] + comp_out;
+                const CeedSize    qf_index        = q * layout_qf[0] + eval_mode_index * layout_qf[1] + e * layout_qf[2];
+                const CeedScalar  qf_value        = assembled_qf_array[qf_index];
+                const CeedScalar *b_out           = &B_mat_out[(q * num_eval_out + e_out) * elem_size_out];
 
-                  sum += B_mat_out[b_out_index] * assembled_qf_array[qf_index];
+                if (e_out == 0) {
+                  CeedPragmaSIMD for (CeedSize n = 0; n < elem_size_out; n++) btd_values[n] = b_out[n] * qf_value;
+                } else {
+                  CeedPragmaSIMD for (CeedSize n = 0; n < elem_size_out; n++) btd_values[n] += b_out[n] * qf_value;
                 }
-                BTD_mat[btd_index] = sum;
+              }
+              if (!contract) {
+                for (CeedSize n = 0; n < elem_size_out; n++) BTD_mat[n * btd_stride + q * num_eval_in + e_in] = BTD_sum[n];
               }
             }
           }
-
           // Form element matrix itself (for each block component)
           if (contract) {
             CeedCall(CeedTensorContractApply(contract, 1, num_qpts_in * num_eval_modes_in[active_input], elem_size_in, elem_size_out, BTD_mat,
-                                             CEED_NOTRANSPOSE, false, B_mat_in, elem_mat));
+                                             CEED_TRANSPOSE, false, B_mat_in, elem_mat));
           } else {
             Ceed ceed;
 
@@ -1013,7 +1027,6 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
                                               num_qpts_in * num_eval_modes_in[active_input]));
             CeedCall(CeedDestroy(&ceed));
           }
-
           // Transform the element matrix if required
           if (elem_rstr_orients_out) {
             const bool *elem_orients = &elem_rstr_orients_out[e * elem_size_out];
@@ -1064,7 +1077,11 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
           // Put element matrix in coordinate data structure
           for (CeedInt i = 0; i < elem_size_out; i++) {
             for (CeedInt j = 0; j < elem_size_in; j++) {
-              vals[offset + count] = elem_mat[i * elem_size_in + j];
+              if (entry_map) {
+                vals[entry_map[offset + count]] += elem_mat[i * elem_size_in + j];
+              } else {
+                vals[offset + count] = elem_mat[i * elem_size_in + j];
+              }
               count++;
             }
           }
@@ -1076,6 +1093,7 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
 
     // Cleanup
     CeedCall(CeedFree(&BTD_mat));
+    CeedCall(CeedFree(&BTD_sum));
     CeedCall(CeedFree(&elem_mat));
     CeedCall(CeedFree(&elem_mat_b));
     if (elem_rstr_type_in == CEED_RESTRICTION_ORIENTED) {
@@ -1096,6 +1114,10 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
   return CEED_ERROR_SUCCESS;
 }
 
+int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt active_input, CeedInt active_output, CeedVector values) {
+  return CeedOperatorAssembleSingleBlockCore(op, offset, active_input, active_output, values, NULL);
+}
+
 /**
   @brief Assemble nonzero entries for non-composite `CeedOperator`.
 
@@ -1109,7 +1131,7 @@ int CeedOperatorAssembleSingleBlock(CeedOperator op, CeedInt offset, CeedInt act
 
   @ref Developer
 **/
-int CeedOperatorAssembleSingle(CeedOperator op, CeedSize offset, CeedVector values) {
+static int CeedOperatorAssembleSingleCore(CeedOperator op, CeedSize offset, CeedVector values, const CeedInt entry_map[]) {
   bool is_composite, is_at_points;
 
   CeedCall(CeedOperatorIsComposite(op, &is_composite));
@@ -1136,14 +1158,14 @@ int CeedOperatorAssembleSingle(CeedOperator op, CeedSize offset, CeedVector valu
   const bool multiple_active_rstr = num_active_rstr_in > 1 || num_active_rstr_out > 1;
 
   if (multiple_active_rstr) {
-    if (!op->LinearAssembleSingleBlock) {
+    if (!entry_map && !op->LinearAssembleSingleBlock) {
       // Operator fallback
       CeedOperator op_fallback;
 
       CeedDebug(CeedOperatorReturnCeed(op), "\nFalling back for CeedOperatorAssembleSingle\n");
       CeedCall(CeedOperatorGetFallback(op, &op_fallback));
       if (op_fallback) {
-        CeedCall(CeedOperatorAssembleSingle(op_fallback, offset, values));
+        CeedCall(CeedOperatorAssembleSingleCore(op_fallback, offset, values, entry_map));
         return CEED_ERROR_SUCCESS;
       }
     }
@@ -1153,7 +1175,7 @@ int CeedOperatorAssembleSingle(CeedOperator op, CeedSize offset, CeedVector valu
       for (CeedInt j = 0; j < num_active_rstr_out; j++) {
         CeedSize num_entries_block;
 
-        CeedCall(CeedOperatorAssembleSingleBlock(op, offset, i, j, values));
+        CeedCall(CeedOperatorAssembleSingleBlockCore(op, offset, i, j, values, entry_map));
         CeedCall(CeedQFunctionAssemblyDataSetBlockAssembling(qf_data, true));
         CeedCall(CeedOperatorAssemblyCountEntriesSingleBlock(op, active_rstrs_in[i], active_rstrs_out[j], &num_entries_block));
         offset += num_entries_block;
@@ -1161,7 +1183,7 @@ int CeedOperatorAssembleSingle(CeedOperator op, CeedSize offset, CeedVector valu
     }
     CeedCall(CeedQFunctionAssemblyDataSetBlockAssembling(qf_data, false));
     return CEED_ERROR_SUCCESS;
-  } else if (op->LinearAssembleSingle) {
+  } else if (!entry_map && op->LinearAssembleSingle) {
     // Backend version
     CeedCall(op->LinearAssembleSingle(op, offset, values));
     return CEED_ERROR_SUCCESS;
@@ -1172,7 +1194,7 @@ int CeedOperatorAssembleSingle(CeedOperator op, CeedSize offset, CeedVector valu
     CeedDebug(CeedOperatorReturnCeed(op), "\nFalling back for CeedOperatorAssembleSingle\n");
     CeedCall(CeedOperatorGetFallback(op, &op_fallback));
     if (op_fallback) {
-      CeedCall(CeedOperatorAssembleSingle(op_fallback, offset, values));
+      CeedCall(CeedOperatorAssembleSingleCore(op_fallback, offset, values, entry_map));
       return CEED_ERROR_SUCCESS;
     }
   }
@@ -1182,8 +1204,12 @@ int CeedOperatorAssembleSingle(CeedOperator op, CeedSize offset, CeedVector valu
             "Backend does not implement CeedOperatorLinearAssemble for AtPoints operator");
 
   // Assemble QFunction for 0 0 block
-  CeedCall(CeedOperatorAssembleSingleBlock(op, offset, 0, 0, values));
+  CeedCall(CeedOperatorAssembleSingleBlockCore(op, offset, 0, 0, values, entry_map));
   return CEED_ERROR_SUCCESS;
+}
+
+int CeedOperatorAssembleSingle(CeedOperator op, CeedSize offset, CeedVector values) {
+  return CeedOperatorAssembleSingleCore(op, offset, values, NULL);
 }
 
 /**
@@ -2796,6 +2822,38 @@ int CeedOperatorLinearAssembleSymbolic(CeedOperator op, CeedSize *num_entries, C
 }
 
 /**
+  @brief Assemble one active input/output block's symbolic pattern.
+
+  This is useful when every active restriction pair has the same element
+  connectivity, as for H1 interpolation/gradient fields. The caller can
+  preallocate the unique sparse graph from one block instead of materializing
+  duplicate row/column streams for every evaluation-mode pair.
+**/
+int CeedOperatorLinearAssembleSymbolicBlock(CeedOperator op, CeedInt active_input, CeedInt active_output, CeedSize *num_entries, CeedInt **rows,
+                                            CeedInt **cols) {
+  bool                     is_composite;
+  CeedInt                  num_active_in, num_active_out;
+  CeedElemRestriction     *active_rstrs_in, *active_rstrs_out;
+  CeedOperatorAssemblyData data;
+
+  CeedCall(CeedOperatorCheckReady(op));
+  CeedCall(CeedOperatorIsComposite(op, &is_composite));
+  CeedCheck(!is_composite, CeedOperatorReturnCeed(op), CEED_ERROR_UNSUPPORTED,
+            "Single-block symbolic assembly does not support composite operators");
+  CeedCall(CeedOperatorGetOperatorAssemblyData(op, &data));
+  CeedCall(CeedOperatorAssemblyDataGetElemRestrictions(data, &num_active_in, &active_rstrs_in, &num_active_out, &active_rstrs_out));
+  CeedCheck(active_input >= 0 && active_input < num_active_in, CeedOperatorReturnCeed(op), CEED_ERROR_DIMENSION,
+            "Active input index %" CeedInt_FMT " is outside [0, %" CeedInt_FMT ")", active_input, num_active_in);
+  CeedCheck(active_output >= 0 && active_output < num_active_out, CeedOperatorReturnCeed(op), CEED_ERROR_DIMENSION,
+            "Active output index %" CeedInt_FMT " is outside [0, %" CeedInt_FMT ")", active_output, num_active_out);
+  CeedCall(CeedOperatorAssemblyCountEntriesSingleBlock(op, active_rstrs_in[active_input], active_rstrs_out[active_output], num_entries));
+  CeedCall(CeedCalloc(*num_entries, rows));
+  CeedCall(CeedCalloc(*num_entries, cols));
+  CeedCall(CeedOperatorAssembleSymbolicSingleBlock(op, 0, active_rstrs_in[active_input], active_rstrs_out[active_output], *rows, *cols));
+  return CEED_ERROR_SUCCESS;
+}
+
+/**
    @brief Fully assemble the nonzero entries of a linear operator.
 
    Expected to be used in conjunction with @ref CeedOperatorLinearAssembleSymbolic().
@@ -2864,6 +2922,95 @@ int CeedOperatorLinearAssemble(CeedOperator op, CeedVector values) {
   // Default to interface version if non-composite and no fallback
   CeedCall(CeedVectorSetValue(values, 0.0));
   CeedCall(CeedOperatorAssembleSingle(op, offset, values));
+  return CEED_ERROR_SUCCESS;
+}
+
+/**
+  @brief Assemble a linear operator while directly reducing element entries into a caller-defined compact value vector.
+
+  `entry_map[k]` gives the destination entry in `values` for entry `k` from
+  @ref CeedOperatorLinearAssembleSymbolic(). Repeated destinations are summed
+  in symbolic assembly order. This CPU fallback path avoids materializing the
+  usually much larger unassembled COO value vector.
+
+  @param[in]  op         `CeedOperator` to assemble
+  @param[in]  entry_map  Map from symbolic COO entry to compact output entry
+  @param[out] values     Compact values, cleared before assembly
+
+  @return An error code: 0 - success, otherwise - failure
+
+  @ref User
+**/
+int CeedOperatorLinearAssembleMapped(CeedOperator op, const CeedInt entry_map[], CeedVector values) {
+  bool          is_composite;
+  CeedInt       num_suboperators;
+  CeedSize      offset = 0, single_entries = 0;
+  CeedOperator *sub_operators;
+
+  CeedCall(CeedOperatorCheckReady(op));
+  CeedCall(CeedOperatorIsComposite(op, &is_composite));
+  CeedCheck(entry_map, CeedOperatorReturnCeed(op), CEED_ERROR_INCOMPATIBLE, "Mapped assembly requires a non-NULL entry map");
+  CeedCall(CeedVectorSetValue(values, 0.0));
+
+  if (is_composite) {
+    CeedCall(CeedOperatorCompositeGetNumSub(op, &num_suboperators));
+    CeedCall(CeedOperatorCompositeGetSubList(op, &sub_operators));
+    for (CeedInt k = 0; k < num_suboperators; k++) {
+      CeedCall(CeedOperatorAssembleSingleCore(sub_operators[k], offset, values, entry_map));
+      CeedCall(CeedOperatorAssemblyCountEntriesSingle(sub_operators[k], &single_entries));
+      offset += single_entries;
+    }
+  } else {
+    CeedInt num_elem = 0;
+
+    CeedCall(CeedOperatorGetNumElements(op, &num_elem));
+    if (num_elem > 0) CeedCall(CeedOperatorAssembleSingleCore(op, 0, values, entry_map));
+  }
+  return CEED_ERROR_SUCCESS;
+}
+
+/**
+  @brief Assemble all active restriction blocks using one repeated compact map.
+
+  Every active input/output restriction pair must have the same symbolic entry
+  count and ordering as block (0,0). Each block contributes directly to the
+  same compact output vector, avoiding a duplicated map for interpolation and
+  gradient evaluation-mode pairs.
+**/
+int CeedOperatorLinearAssembleMappedRepeatedBlock(CeedOperator op, const CeedInt entry_map[], CeedVector values) {
+  bool                      is_composite;
+  CeedInt                   num_active_in, num_active_out;
+  CeedSize                  block_entries;
+  CeedElemRestriction      *active_rstrs_in, *active_rstrs_out;
+  CeedOperatorAssemblyData  data;
+  CeedQFunctionAssemblyData qf_data;
+
+  CeedCall(CeedOperatorCheckReady(op));
+  CeedCall(CeedOperatorIsComposite(op, &is_composite));
+  CeedCheck(!is_composite, CeedOperatorReturnCeed(op), CEED_ERROR_UNSUPPORTED,
+            "Repeated-block mapped assembly does not support composite operators");
+  CeedCheck(entry_map, CeedOperatorReturnCeed(op), CEED_ERROR_INCOMPATIBLE, "Mapped assembly requires a non-NULL entry map");
+  CeedCall(CeedOperatorGetOperatorAssemblyData(op, &data));
+  CeedCall(CeedOperatorGetQFunctionAssemblyData(op, &qf_data));
+  CeedCall(CeedOperatorAssemblyDataGetElemRestrictions(data, &num_active_in, &active_rstrs_in, &num_active_out, &active_rstrs_out));
+  CeedCall(CeedOperatorAssemblyCountEntriesSingleBlock(op, active_rstrs_in[0], active_rstrs_out[0], &block_entries));
+  CeedCall(CeedVectorSetValue(values, 0.0));
+  for (CeedInt i = 0; i < num_active_in; i++) {
+    for (CeedInt j = 0; j < num_active_out; j++) {
+      CeedSize entries;
+
+      CeedCall(CeedOperatorAssemblyCountEntriesSingleBlock(op, active_rstrs_in[i], active_rstrs_out[j], &entries));
+      CeedCheck(entries == block_entries, CeedOperatorReturnCeed(op), CEED_ERROR_DIMENSION,
+                "Active restriction block (%" CeedInt_FMT ",%" CeedInt_FMT ") has %" CeedSize_FMT
+                " entries, but block (0,0) has %" CeedSize_FMT,
+                i, j, entries, block_entries);
+      CeedCall(CeedOperatorAssembleSingleBlockCore(op, 0, i, j, values, entry_map));
+      // The first block refreshes the quadrature Jacobian for this assembly.
+      // Reuse it for the remaining interpolation/gradient blocks only.
+      CeedCall(CeedQFunctionAssemblyDataSetBlockAssembling(qf_data, true));
+    }
+  }
+  CeedCall(CeedQFunctionAssemblyDataSetBlockAssembling(qf_data, false));
   return CEED_ERROR_SUCCESS;
 }
 

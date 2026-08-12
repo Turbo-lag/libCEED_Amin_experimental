@@ -332,6 +332,16 @@ int CeedQFunctionGetUserFunction(CeedQFunction qf, CeedQFunctionUser *f) {
   return CEED_ERROR_SUCCESS;
 }
 
+int CeedQFunctionGetAssemblyUserFunction(CeedQFunction qf, CeedQFunctionUser *f) {
+  *f = qf->assembly_function;
+  return CEED_ERROR_SUCCESS;
+}
+
+int CeedQFunctionGetAssemblyDataGradientInputToValueOutputZero(CeedQFunction qf, bool *is_zero) {
+  *is_zero = qf->assembly_data_grad_in_value_out_zero;
+  return CEED_ERROR_SUCCESS;
+}
+
 /**
   @brief Get global context for a `CeedQFunction`.
 
@@ -965,6 +975,39 @@ int CeedQFunctionSetContext(CeedQFunction qf, CeedQFunctionContext ctx) {
   CeedCall(CeedQFunctionContextDestroy(&qf->ctx));
   qf->ctx = ctx;
   if (ctx) CeedCall(CeedQFunctionContextReference(ctx));
+  return CEED_ERROR_SUCCESS;
+}
+
+/**
+  @brief Set an optional user function that forms the complete pointwise
+  Jacobian of this `CeedQFunction` in one call.
+
+  The assembly function receives the same input arrays as the apply function.
+  Its first output is a column-major stream of pointwise coefficients, with
+  all quadrature points for each active input-column/output-row pair stored
+  contiguously. This callback is an assembly acceleration;
+  the ordinary apply function remains authoritative for operator action.
+
+  Backends that do not support direct pointwise assembly ignore this callback
+  and use the standard directional assembly path.
+**/
+int CeedQFunctionSetAssemblyUserFunction(CeedQFunction qf, CeedQFunctionUser f) {
+  CeedCheck(!qf->is_immutable, CeedQFunctionReturnCeed(qf), CEED_ERROR_MAJOR, "Cannot modify an immutable QFunction");
+  qf->assembly_function = f;
+  return CEED_ERROR_SUCCESS;
+}
+
+/**
+  @brief Declare that the complete pointwise Jacobian has structurally zero
+  gradient-input to value-output coefficient blocks.
+
+  This optional assembly hint permits backends to omit those coefficients.
+  The default is false. Setting it true is an assertion that must hold for all
+  states and quadrature points evaluated by this `CeedQFunction`.
+**/
+int CeedQFunctionSetAssemblyDataGradientInputToValueOutputZero(CeedQFunction qf, bool is_zero) {
+  CeedCheck(!qf->is_immutable, CeedQFunctionReturnCeed(qf), CEED_ERROR_MAJOR, "Cannot modify an immutable QFunction");
+  qf->assembly_data_grad_in_value_out_zero = is_zero;
   return CEED_ERROR_SUCCESS;
 }
 

@@ -33,6 +33,10 @@ typedef struct {
   CeedInt              qf_size_in, qf_size_out;
   CeedVector           qf_l_vec;
   CeedElemRestriction  qf_block_rstr;
+  CeedScalar          *mapped_qf_block;
+  CeedScalar          *mapped_btd;
+  CeedScalar          *mapped_btd_sum;
+  CeedScalar          *mapped_elem_mat;
 } CeedOperator_Opt;
 
 CEED_INTERN int CeedTensorContractCreate_Opt(CeedTensorContract contract);

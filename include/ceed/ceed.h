@@ -385,6 +385,8 @@ CEED_EXTERN int  CeedQFunctionAddOutput(CeedQFunction qf, const char *field_name
 CEED_EXTERN int  CeedQFunctionGetFields(CeedQFunction qf, CeedInt *num_input_fields, CeedQFunctionField **input_fields, CeedInt *num_output_fields,
                                         CeedQFunctionField **output_fields);
 CEED_EXTERN int  CeedQFunctionSetContext(CeedQFunction qf, CeedQFunctionContext ctx);
+CEED_EXTERN int  CeedQFunctionSetAssemblyUserFunction(CeedQFunction qf, CeedQFunctionUser f);
+CEED_EXTERN int  CeedQFunctionSetAssemblyDataGradientInputToValueOutputZero(CeedQFunction qf, bool is_zero);
 CEED_EXTERN int  CeedQFunctionSetContextWritable(CeedQFunction qf, bool is_writable);
 CEED_EXTERN int  CeedQFunctionSetUserFlopsEstimate(CeedQFunction qf, CeedSize flops);
 CEED_EXTERN int  CeedQFunctionSetNumViewTabs(CeedQFunction qf, CeedInt num_tabs);
@@ -463,8 +465,12 @@ CEED_EXTERN int  CeedOperatorLinearAssemblePointBlockDiagonal(CeedOperator op, C
 CEED_EXTERN int  CeedOperatorLinearAssembleAddPointBlockDiagonal(CeedOperator op, CeedVector assembled, CeedRequest *request);
 CEED_EXTERN int  CeedOperatorLinearAssemblePointBlockDiagonalSymbolic(CeedOperator op, CeedSize *num_entries, CeedInt **rows, CeedInt **cols);
 CEED_EXTERN int  CeedOperatorLinearAssembleSymbolic(CeedOperator op, CeedSize *num_entries, CeedInt **rows, CeedInt **cols);
+CEED_EXTERN int  CeedOperatorLinearAssembleSymbolicBlock(CeedOperator op, CeedInt active_input, CeedInt active_output, CeedSize *num_entries,
+                                                         CeedInt **rows, CeedInt **cols);
 CEED_EXTERN int  CeedOperatorLinearAssembleGetNumEntries(CeedOperator op, CeedSize *num_entries);
 CEED_EXTERN int  CeedOperatorLinearAssemble(CeedOperator op, CeedVector values);
+CEED_EXTERN int  CeedOperatorLinearAssembleMapped(CeedOperator op, const CeedInt entry_map[], CeedVector values);
+CEED_EXTERN int  CeedOperatorLinearAssembleMappedRepeatedBlock(CeedOperator op, const CeedInt entry_map[], CeedVector values);
 CEED_EXTERN int  CeedOperatorCompositeGetMultiplicity(CeedOperator op, CeedInt num_skip_indices, CeedInt *skip_indices, CeedVector mult);
 CEED_EXTERN int  CeedOperatorMultigridLevelCreate(CeedOperator op_fine, CeedVector p_mult_fine, CeedElemRestriction rstr_coarse,
                                                   CeedBasis basis_coarse, CeedOperator *op_coarse, CeedOperator *op_prolong,
