@@ -1361,6 +1361,7 @@ int CeedInit(const char *resource, Ceed *ceed) {
       CEED_FTABLE_ENTRY(CeedOperator, LinearAssembleSingle),
       CEED_FTABLE_ENTRY(CeedOperator, LinearAssembleSingleBlock),
       CEED_FTABLE_ENTRY(CeedOperator, LinearAssembleSingleBlockMapped),
+      CEED_FTABLE_ENTRY(CeedOperator, ApplyAndLinearAssembleMapped),
       CEED_FTABLE_ENTRY(CeedOperator, CreateFDMElementInverse),
       CEED_FTABLE_ENTRY(CeedOperator, Apply),
       CEED_FTABLE_ENTRY(CeedOperator, ApplyComposite),

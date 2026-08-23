@@ -2969,6 +2969,175 @@ int CeedOperatorLinearAssembleMapped(CeedOperator op, const CeedInt entry_map[],
   return CEED_ERROR_SUCCESS;
 }
 
+// Check that interleaving aligned composite children cannot expose a target
+// child to passive data produced by a different residual child. Passive output
+// vectors must also have a single producer child so global ApplyAdd semantics
+// are preserved when supported and unsupported children are mixed.
+static int CeedOperatorCompositePairCheckLocalOrdering(CeedInt num_suboperators, CeedOperator residual_suboperators[],
+                                                       CeedOperator jacobian_suboperators[], bool *is_safe) {
+  *is_safe = true;
+  for (CeedInt i = 0; i < num_suboperators; i++) {
+    bool residual_is_composite, jacobian_is_composite;
+
+    CeedCall(CeedOperatorIsComposite(residual_suboperators[i], &residual_is_composite));
+    CeedCall(CeedOperatorIsComposite(jacobian_suboperators[i], &jacobian_is_composite));
+    if (residual_is_composite || jacobian_is_composite) {
+      *is_safe = false;
+      return CEED_ERROR_SUCCESS;
+    }
+  }
+  for (CeedInt i = 0; i < num_suboperators && *is_safe; i++) {
+
+    CeedInt            num_residual_outputs;
+    CeedOperatorField *residual_outputs;
+
+    CeedCall(CeedOperatorGetFields(residual_suboperators[i], NULL, NULL, &num_residual_outputs, &residual_outputs));
+    for (CeedInt output = 0; output < num_residual_outputs && *is_safe; output++) {
+      CeedVector producer;
+
+      CeedCall(CeedOperatorFieldGetVector(residual_outputs[output], &producer));
+      if (producer != CEED_VECTOR_ACTIVE && producer != CEED_VECTOR_NONE) {
+        for (CeedInt k = 0; k < num_suboperators && *is_safe; k++) {
+          if (k == i) continue;
+
+          CeedInt            num_other_outputs, num_other_inputs;
+          CeedOperatorField *other_outputs, *other_inputs;
+
+          CeedCall(CeedOperatorGetFields(residual_suboperators[k], NULL, NULL, &num_other_outputs, &other_outputs));
+          for (CeedInt other = 0; other < num_other_outputs; other++) {
+            CeedVector other_vec;
+
+            CeedCall(CeedOperatorFieldGetVector(other_outputs[other], &other_vec));
+            if (producer == other_vec) *is_safe = false;
+            CeedCall(CeedVectorDestroy(&other_vec));
+          }
+          CeedCall(CeedOperatorGetFields(jacobian_suboperators[k], &num_other_inputs, &other_inputs, NULL, NULL));
+          for (CeedInt other = 0; other < num_other_inputs; other++) {
+            CeedVector other_vec;
+
+            CeedCall(CeedOperatorFieldGetVector(other_inputs[other], &other_vec));
+            if (producer == other_vec) *is_safe = false;
+            CeedCall(CeedVectorDestroy(&other_vec));
+          }
+        }
+      }
+      CeedCall(CeedVectorDestroy(&producer));
+    }
+  }
+  return CEED_ERROR_SUCCESS;
+}
+
+/**
+  @brief Apply a residual operator and assemble a separate Jacobian operator directly into a caller-defined compact value vector.
+
+  This paired operation has the exact fallback semantics of
+  @ref CeedOperatorApply() on `residual_op` followed by
+  @ref CeedOperatorLinearAssembleMapped() on `jacobian_op`. A backend may
+  combine compatible block traversals while preserving the two operators'
+  distinct active fields, bases, restrictions, and QFunctions. Aligned
+  composite children may be combined when each passive output has one producer
+  child and target children have no cross-child passive dependencies.
+  Incompatible pairs retain the exact immediate sequential semantics.
+
+  A backend fast path may consume a passive `CEED_EVAL_NONE` vector shared by
+  the two operators block-local, but it must also preserve ordinary residual
+  apply semantics by materializing that passive output before returning.
+
+  `entry_map[k]` gives the destination entry in `values` for entry `k` from
+  @ref CeedOperatorLinearAssembleSymbolic(). Repeated destinations are summed
+  in symbolic assembly order.
+
+  @param[in]  residual_op `CeedOperator` to apply
+  @param[in]  in          Active input vector
+  @param[out] out         Active output vector
+  @param[in]  jacobian_op `CeedOperator` to assemble
+  @param[in]  entry_map   Map from symbolic COO entry to compact output entry
+  @param[out] values      Compact assembled values
+
+  @return An error code: 0 - success, otherwise - failure
+
+  @ref User
+**/
+int CeedOperatorApplyAndLinearAssembleMapped(CeedOperator residual_op, CeedVector in, CeedVector out, CeedOperator jacobian_op,
+                                             const CeedInt entry_map[], CeedVector values) {
+  bool residual_is_composite, jacobian_is_composite;
+
+  CeedCall(CeedOperatorCheckReady(residual_op));
+  CeedCall(CeedOperatorCheckReady(jacobian_op));
+  CeedCheck(entry_map, CeedOperatorReturnCeed(jacobian_op), CEED_ERROR_INCOMPATIBLE, "Mapped assembly requires a non-NULL entry map");
+  CeedCall(CeedOperatorIsComposite(residual_op, &residual_is_composite));
+  CeedCall(CeedOperatorIsComposite(jacobian_op, &jacobian_is_composite));
+
+  if (residual_is_composite && jacobian_is_composite) {
+    CeedInt       num_residual_suboperators, num_jacobian_suboperators;
+    CeedOperator *residual_suboperators, *jacobian_suboperators;
+
+    CeedCall(CeedOperatorCompositeGetNumSub(residual_op, &num_residual_suboperators));
+    CeedCall(CeedOperatorCompositeGetNumSub(jacobian_op, &num_jacobian_suboperators));
+    if (num_residual_suboperators == num_jacobian_suboperators) {
+      bool is_locally_ordered;
+
+      CeedCall(CeedOperatorCompositeGetSubList(residual_op, &residual_suboperators));
+      CeedCall(CeedOperatorCompositeGetSubList(jacobian_op, &jacobian_suboperators));
+      CeedCall(CeedOperatorCompositePairCheckLocalOrdering(num_residual_suboperators, residual_suboperators, jacobian_suboperators,
+                                                           &is_locally_ordered));
+      if (is_locally_ordered) {
+        CeedSize offset = 0;
+
+        if (out != CEED_VECTOR_NONE) CeedCall(CeedVectorSetValue(out, 0.0));
+        CeedCall(CeedVectorSetValue(values, 0.0));
+        // Match composite ApplyAddActive by clearing every passive output once,
+        // then let all children add to active and passive destinations.
+        for (CeedInt i = 0; i < num_residual_suboperators; i++) {
+          CeedInt            num_outputs;
+          CeedOperatorField *outputs;
+
+          CeedCall(CeedOperatorGetFields(residual_suboperators[i], NULL, NULL, &num_outputs, &outputs));
+          for (CeedInt j = 0; j < num_outputs; j++) {
+            CeedVector vec;
+
+            CeedCall(CeedOperatorFieldGetVector(outputs[j], &vec));
+            if (vec != CEED_VECTOR_ACTIVE && vec != CEED_VECTOR_NONE) CeedCall(CeedVectorSetValue(vec, 0.0));
+            CeedCall(CeedVectorDestroy(&vec));
+          }
+        }
+        for (CeedInt i = 0; i < num_residual_suboperators; i++) {
+          CeedInt  residual_num_elem = 0, jacobian_num_elem = 0;
+          CeedSize num_entries = 0;
+          bool     is_supported = false;
+
+          CeedCall(CeedOperatorGetNumElements(residual_suboperators[i], &residual_num_elem));
+          CeedCall(CeedOperatorGetNumElements(jacobian_suboperators[i], &jacobian_num_elem));
+          if (residual_num_elem > 0 && jacobian_num_elem > 0 && residual_suboperators[i]->ApplyAndLinearAssembleMapped) {
+            CeedCall(residual_suboperators[i]->ApplyAndLinearAssembleMapped(residual_suboperators[i], in, out, jacobian_suboperators[i],
+                                                                            entry_map + offset, values, true, &is_supported));
+          }
+          if (!is_supported) {
+            CeedCall(CeedOperatorApplyAdd(residual_suboperators[i], in, out, CEED_REQUEST_IMMEDIATE));
+            CeedCall(CeedOperatorAssembleSingleCore(jacobian_suboperators[i], offset, values, entry_map));
+          }
+          CeedCall(CeedOperatorAssemblyCountEntriesSingle(jacobian_suboperators[i], &num_entries));
+          offset += num_entries;
+        }
+        return CEED_ERROR_SUCCESS;
+      }
+    }
+  }
+
+  if (!residual_is_composite && !jacobian_is_composite && residual_op->num_elem > 0 && jacobian_op->num_elem > 0 &&
+      residual_op->ApplyAndLinearAssembleMapped) {
+    bool is_supported = false;
+
+    CeedCall(residual_op->ApplyAndLinearAssembleMapped(residual_op, in, out, jacobian_op, entry_map, values, false, &is_supported));
+    if (is_supported) return CEED_ERROR_SUCCESS;
+  }
+
+  CeedDebug(CeedOperatorReturnCeed(residual_op), "\nUsing sequential fallback for paired residual and mapped assembly\n");
+  CeedCall(CeedOperatorApply(residual_op, in, out, CEED_REQUEST_IMMEDIATE));
+  CeedCall(CeedOperatorLinearAssembleMapped(jacobian_op, entry_map, values));
+  return CEED_ERROR_SUCCESS;
+}
+
 /**
   @brief Assemble all active restriction blocks using one repeated compact map.
 

@@ -471,6 +471,8 @@ CEED_EXTERN int  CeedOperatorLinearAssembleGetNumEntries(CeedOperator op, CeedSi
 CEED_EXTERN int  CeedOperatorLinearAssemble(CeedOperator op, CeedVector values);
 CEED_EXTERN int  CeedOperatorLinearAssembleMapped(CeedOperator op, const CeedInt entry_map[], CeedVector values);
 CEED_EXTERN int  CeedOperatorLinearAssembleMappedRepeatedBlock(CeedOperator op, const CeedInt entry_map[], CeedVector values);
+CEED_EXTERN int  CeedOperatorApplyAndLinearAssembleMapped(CeedOperator residual_op, CeedVector in, CeedVector out, CeedOperator jacobian_op,
+                                                          const CeedInt entry_map[], CeedVector values);
 CEED_EXTERN int  CeedOperatorCompositeGetMultiplicity(CeedOperator op, CeedInt num_skip_indices, CeedInt *skip_indices, CeedVector mult);
 CEED_EXTERN int  CeedOperatorMultigridLevelCreate(CeedOperator op_fine, CeedVector p_mult_fine, CeedElemRestriction rstr_coarse,
                                                   CeedBasis basis_coarse, CeedOperator *op_coarse, CeedOperator *op_prolong,

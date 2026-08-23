@@ -9,19 +9,9 @@
 #include <ceed/backend.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "ceed-opt.h"
-
-static inline double CeedOperatorAssemblyTime_Opt(void) {
-  struct timespec time;
-
-  clock_gettime(CLOCK_MONOTONIC, &time);
-  return (double)time.tv_sec + 1e-9 * time.tv_nsec;
-}
 
 //------------------------------------------------------------------------------
 // Setup Input/Output Fields
@@ -287,11 +277,12 @@ static int CeedOperatorSetup_Opt(CeedOperator op) {
 // Setup Input Fields
 //------------------------------------------------------------------------------
 static inline int CeedOperatorSetupInputs_Opt(CeedInt num_input_fields, CeedQFunctionField *qf_input_fields, CeedOperatorField *op_input_fields,
-                                              CeedVector in_vec, CeedScalar *e_data[2 * CEED_FIELD_MAX], CeedOperator_Opt *impl,
-                                              CeedRequest *request) {
+                                              CeedInt skip_field, CeedVector in_vec, CeedScalar *e_data[2 * CEED_FIELD_MAX],
+                                              CeedOperator_Opt *impl, CeedRequest *request) {
   for (CeedInt i = 0; i < num_input_fields; i++) {
     CeedEvalMode eval_mode;
 
+    if (i == skip_field) continue;
     CeedCallBackend(CeedQFunctionFieldGetEvalMode(qf_input_fields[i], &eval_mode));
     if (eval_mode == CEED_EVAL_WEIGHT) {  // Skip
     } else {
@@ -328,7 +319,8 @@ static inline int CeedOperatorSetupInputs_Opt(CeedInt num_input_fields, CeedQFun
 //------------------------------------------------------------------------------
 static inline int CeedOperatorInputBasis_Opt(CeedInt e, CeedInt Q, CeedQFunctionField *qf_input_fields, CeedOperatorField *op_input_fields,
                                              CeedInt num_input_fields, CeedInt block_size, CeedVector in_vec, bool skip_active,
-                                             CeedScalar *e_data[2 * CEED_FIELD_MAX], CeedOperator_Opt *impl, CeedRequest *request) {
+                                             CeedInt skip_field, CeedScalar *e_data[2 * CEED_FIELD_MAX], CeedOperator_Opt *impl,
+                                             CeedRequest *request) {
   for (CeedInt i = 0; i < num_input_fields; i++) {
     bool                is_active;
     CeedInt             elem_size, size, num_comp;
@@ -337,6 +329,7 @@ static inline int CeedOperatorInputBasis_Opt(CeedInt e, CeedInt Q, CeedQFunction
     CeedElemRestriction elem_rstr;
     CeedBasis           basis;
 
+    if (i == skip_field) continue;
     // Skip active input
     CeedCallBackend(CeedOperatorFieldGetVector(op_input_fields[i], &vec));
     is_active = vec == CEED_VECTOR_ACTIVE;
@@ -433,11 +426,12 @@ static inline int CeedOperatorOutputBasis_Opt(CeedInt e, CeedInt Q, CeedQFunctio
 // Restore Input Vectors
 //------------------------------------------------------------------------------
 static inline int CeedOperatorRestoreInputs_Opt(CeedInt num_input_fields, CeedQFunctionField *qf_input_fields, CeedOperatorField *op_input_fields,
-                                                CeedScalar *e_data[2 * CEED_FIELD_MAX], CeedOperator_Opt *impl) {
+                                                CeedInt skip_field, CeedScalar *e_data[2 * CEED_FIELD_MAX], CeedOperator_Opt *impl) {
   for (CeedInt i = 0; i < num_input_fields; i++) {
     CeedEvalMode eval_mode;
     CeedVector   vec;
 
+    if (i == skip_field) continue;
     CeedCallBackend(CeedQFunctionFieldGetEvalMode(qf_input_fields[i], &eval_mode));
     CeedCallBackend(CeedOperatorFieldGetVector(op_input_fields[i], &vec));
     if (eval_mode != CEED_EVAL_WEIGHT && vec != CEED_VECTOR_ACTIVE) {
@@ -488,7 +482,7 @@ static int CeedOperatorApplyAdd_Opt(CeedOperator op, CeedVector in_vec, CeedVect
   CeedCallBackend(CeedQFunctionGetFields(qf, NULL, &qf_input_fields, NULL, &qf_output_fields));
 
   // Input Evecs and Restriction
-  CeedCallBackend(CeedOperatorSetupInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, in_vec, e_data, impl, request));
+  CeedCallBackend(CeedOperatorSetupInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, -1, in_vec, e_data, impl, request));
 
   // Output Lvecs, Evecs, and Qvecs
   for (CeedInt i = 0; i < num_output_fields; i++) {
@@ -505,7 +499,7 @@ static int CeedOperatorApplyAdd_Opt(CeedOperator op, CeedVector in_vec, CeedVect
   // Loop through elements
   for (CeedInt e = 0; e < num_blocks * block_size; e += block_size) {
     // Input basis apply
-    CeedCallBackend(CeedOperatorInputBasis_Opt(e, Q, qf_input_fields, op_input_fields, num_input_fields, block_size, in_vec, false, e_data, impl,
+    CeedCallBackend(CeedOperatorInputBasis_Opt(e, Q, qf_input_fields, op_input_fields, num_input_fields, block_size, in_vec, false, -1, e_data, impl,
                                                request));
 
     // Q function
@@ -519,7 +513,7 @@ static int CeedOperatorApplyAdd_Opt(CeedOperator op, CeedVector in_vec, CeedVect
   }
 
   // Restore input arrays
-  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, e_data, impl));
+  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, -1, e_data, impl));
   CeedCallBackend(CeedQFunctionDestroy(&qf));
   return CEED_ERROR_SUCCESS;
 }
@@ -561,7 +555,7 @@ static inline int CeedOperatorLinearAssembleQFunctionCore_Opt(CeedOperator op, b
   CeedCheck(!impl->is_identity_rstr_op, ceed, CEED_ERROR_BACKEND, "Assembling restriction only operators is not supported");
 
   // Input Evecs and Restriction
-  CeedCallBackend(CeedOperatorSetupInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, NULL, e_data, impl, request));
+  CeedCallBackend(CeedOperatorSetupInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, -1, NULL, e_data, impl, request));
 
   // Count number of active input fields
   if (qf_size_in == 0) {
@@ -647,7 +641,7 @@ static inline int CeedOperatorLinearAssembleQFunctionCore_Opt(CeedOperator op, b
     CeedCallBackend(CeedVectorGetArray(l_vec, CEED_MEM_HOST, &l_vec_array));
 
     // Input basis apply
-    CeedCallBackend(CeedOperatorInputBasis_Opt(e, Q, qf_input_fields, op_input_fields, num_input_fields, block_size, NULL, true, e_data, impl,
+    CeedCallBackend(CeedOperatorInputBasis_Opt(e, Q, qf_input_fields, op_input_fields, num_input_fields, block_size, NULL, true, -1, e_data, impl,
                                                request));
 
     // Assemble QFunction
@@ -742,7 +736,7 @@ static inline int CeedOperatorLinearAssembleQFunctionCore_Opt(CeedOperator op, b
   }
 
   // Restore input arrays
-  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, e_data, impl));
+  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, -1, e_data, impl));
   CeedCallBackend(CeedDestroy(&ceed));
   CeedCallBackend(CeedQFunctionDestroy(&qf));
   return CEED_ERROR_SUCCESS;
@@ -751,6 +745,79 @@ static inline int CeedOperatorLinearAssembleQFunctionCore_Opt(CeedOperator op, b
 //------------------------------------------------------------------------------
 // Fused mapped linear assembly
 //------------------------------------------------------------------------------
+static bool CeedOperatorCanUseNativeP1Assembly_Opt(CeedQFunctionUser assembly_qf, bool grad_in_value_out_zero, CeedTensorContract contract,
+                                                   CeedInt num_comp_in, CeedInt num_comp_out, CeedInt elem_size_in, CeedInt elem_size_out,
+                                                   CeedInt Q, CeedInt qf_size_in, CeedInt qf_size_out, CeedInt num_eval_modes_in,
+                                                   CeedInt num_eval_modes_out, const CeedSize eval_mode_offsets_in[],
+                                                   const CeedSize eval_mode_offsets_out[]) {
+  return assembly_qf && grad_in_value_out_zero && contract && num_comp_in == 4 && num_comp_out == 4 && elem_size_in == 4 && elem_size_out == 4 &&
+         Q == 4 && qf_size_in == 12 && qf_size_out == 12 && num_eval_modes_in == 3 && num_eval_modes_out == 3 && eval_mode_offsets_in[0] == 0 &&
+         eval_mode_offsets_in[1] == 4 && eval_mode_offsets_in[2] == 8 && eval_mode_offsets_out[0] == 0 && eval_mode_offsets_out[1] == 4 &&
+         eval_mode_offsets_out[2] == 8;
+}
+
+static void CeedOperatorBuildNativeP1BasisProducts_Opt(const CeedScalar B_mat_in[], const CeedScalar B_mat_out[],
+                                                       CeedScalar basis_products[16][4][9]) {
+  for (CeedInt node_out = 0; node_out < 4; node_out++) {
+    for (CeedInt node_in = 0; node_in < 4; node_in++) {
+      const CeedInt node_pair = node_out * 4 + node_in;
+
+      for (CeedInt q = 0; q < 4; q++) {
+        for (CeedInt eval_out = 0; eval_out < 3; eval_out++) {
+          const CeedScalar b_out = B_mat_out[(q * 3 + eval_out) * 4 + node_out];
+
+          for (CeedInt eval_in = 0; eval_in < 3; eval_in++) {
+            basis_products[node_pair][q][eval_out * 3 + eval_in] = b_out * B_mat_in[(q * 3 + eval_in) * 4 + node_in];
+          }
+        }
+      }
+    }
+  }
+}
+
+static bool CeedOperatorNativeP1ValueOutputIsZero_Opt(const CeedScalar qf_block[], CeedInt Q, CeedInt block_size) {
+  for (CeedInt col = 0; col < 4; col++) {
+    for (CeedInt row = 0; row < 4; row++) {
+      for (CeedInt point = 0; point < Q * block_size; point++) {
+        if (qf_block[((CeedSize)col * 12 + row) * Q * block_size + point] != 0.) return false;
+      }
+    }
+  }
+  return true;
+}
+
+static void CeedOperatorAssembleNativeP1Mapped_Opt(const CeedScalar qf_block[], CeedInt Q, CeedInt block_size, CeedInt lane,
+                                                   bool value_output_zero, const CeedScalar basis_products[16][4][9], CeedSize entry_offset,
+                                                   const CeedInt entry_map[], CeedSize *count, CeedScalar vals[]) {
+  for (CeedInt comp_in = 0; comp_in < 4; comp_in++) {
+    for (CeedInt comp_out = 0; comp_out < 4; comp_out++) {
+      CeedScalar entries[16] = {0.};
+      const CeedSize col_0 = comp_in, col_1 = 4 + comp_in, col_2 = 8 + comp_in;
+      const CeedSize row_0 = comp_out, row_1 = 4 + comp_out, row_2 = 8 + comp_out;
+
+      for (CeedInt q = 0; q < 4; q++) {
+        const CeedSize   point_index = (CeedSize)q * block_size + lane;
+        const CeedScalar coeff_00 = value_output_zero ? 0. : qf_block[(col_0 * 12 + row_0) * Q * block_size + point_index];
+        const CeedScalar coeff_10 = qf_block[(col_0 * 12 + row_1) * Q * block_size + point_index];
+        const CeedScalar coeff_11 = qf_block[(col_1 * 12 + row_1) * Q * block_size + point_index];
+        const CeedScalar coeff_12 = qf_block[(col_2 * 12 + row_1) * Q * block_size + point_index];
+        const CeedScalar coeff_20 = qf_block[(col_0 * 12 + row_2) * Q * block_size + point_index];
+        const CeedScalar coeff_21 = qf_block[(col_1 * 12 + row_2) * Q * block_size + point_index];
+        const CeedScalar coeff_22 = qf_block[(col_2 * 12 + row_2) * Q * block_size + point_index];
+
+        CeedPragmaSIMD for (CeedInt node_pair = 0; node_pair < 16; node_pair++) {
+          const CeedScalar *basis_product = basis_products[node_pair][q];
+
+          entries[node_pair] += basis_product[0] * coeff_00 + basis_product[3] * coeff_10 + basis_product[4] * coeff_11 +
+                                basis_product[5] * coeff_12 + basis_product[6] * coeff_20 + basis_product[7] * coeff_21 +
+                                basis_product[8] * coeff_22;
+        }
+      }
+      for (CeedInt node_pair = 0; node_pair < 16; node_pair++) vals[entry_map[entry_offset + (*count)++]] += entries[node_pair];
+    }
+  }
+}
+
 static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize offset, CeedInt active_input, CeedInt active_output, CeedVector values,
                                                      const CeedInt entry_map[], bool *is_supported) {
   Ceed                     ceed;
@@ -807,16 +874,10 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
   }
   *is_supported = true;
 
-  const char *timing_env     = getenv("CEED_OPT_MAPPED_ASSEMBLY_TIMING");
-  const bool  timing_enabled = timing_env && strcmp(timing_env, "0");
-  double total_start = 0.0, phase_start = 0.0, qfunction_start = 0.0, setup_time = 0.0, input_basis_time = 0.0, qfunction_time = 0.0,
-         qf_seed_time = 0.0, qf_bind_time = 0.0, qf_apply_time = 0.0, qf_unbind_time = 0.0, qf_reset_time = 0.0, btd_time = 0.0,
-         contract_time = 0.0, scatter_time = 0.0;
-  if (timing_enabled) total_start = CeedOperatorAssemblyTime_Opt();
-
   CeedCallBackend(CeedOperatorSetup_Opt(op));
   CeedCheck(!impl->is_identity_rstr_op, ceed, CEED_ERROR_BACKEND, "Assembling restriction only operators is not supported");
-  CeedCallBackend(CeedOperatorSetupInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, NULL, e_data, impl, CEED_REQUEST_IMMEDIATE));
+  CeedCallBackend(
+      CeedOperatorSetupInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, -1, NULL, e_data, impl, CEED_REQUEST_IMMEDIATE));
 
   CeedInt qf_size_in = impl->qf_size_in, qf_size_out = impl->qf_size_out;
   if (!qf_size_in) {
@@ -867,9 +928,13 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
   CeedCallBackend(CeedElemRestrictionGetNumElements(elem_rstr_out, &num_elem_out));
   CeedCallBackend(CeedElemRestrictionGetElementSize(elem_rstr_out, &elem_size_out));
   CeedCallBackend(CeedElemRestrictionGetNumComponents(elem_rstr_out, &num_comp_out));
-  if (num_comp_in == 1 && num_comp_out == 1) {
+  // Preserve the established scalar fallback unless the QFunction supplies a
+  // complete pointwise Jacobian. In that case the same mapped contraction used
+  // by block operators is valid for the single 1x1 component block and avoids
+  // repeated directional QFunction applications.
+  if (num_comp_in == 1 && num_comp_out == 1 && !assembly_qf) {
     *is_supported = false;
-    CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, e_data, impl));
+    CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, -1, e_data, impl));
     CeedCallBackend(CeedDestroy(&ceed));
     CeedCallBackend(CeedQFunctionDestroy(&qf));
     return CEED_ERROR_SUCCESS;
@@ -881,40 +946,17 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
   const CeedInt      num_component_blocks = num_comp_in * num_comp_out;
   const CeedSize     btd_stride           = Q * num_eval_modes_in[active_input];
   const CeedSize     qf_block_size        = (CeedSize)qf_size_in * qf_size_out * Q * block_size;
-  const char         *native_p1_env        = getenv("CEED_OPT_NATIVE_P1_DIRECT");
-
   CeedCallBackend(CeedBasisGetTensorContract(basis_in, &contract));
-  const bool native_p1_direct = assembly_qf && assembly_grad_in_value_out_zero && contract && num_comp_in == 4 && num_comp_out == 4 &&
-                                elem_size_in == 4 && elem_size_out == 4 && Q == 4 &&
-                                qf_size_in == 12 && qf_size_out == 12 && num_eval_modes_in[active_input] == 3 &&
-                                num_eval_modes_out[active_output] == 3 && eval_mode_offsets_in[active_input][0] == 0 &&
-                                eval_mode_offsets_in[active_input][1] == 4 && eval_mode_offsets_in[active_input][2] == 8 &&
-                                eval_mode_offsets_out[active_output][0] == 0 && eval_mode_offsets_out[active_output][1] == 4 &&
-                                eval_mode_offsets_out[active_output][2] == 8 && (!native_p1_env || strcmp(native_p1_env, "0"));
+  const bool native_p1_direct = CeedOperatorCanUseNativeP1Assembly_Opt(
+      assembly_qf, assembly_grad_in_value_out_zero, contract, num_comp_in, num_comp_out, elem_size_in, elem_size_out, Q, qf_size_in, qf_size_out,
+      num_eval_modes_in[active_input], num_eval_modes_out[active_output], eval_mode_offsets_in[active_input], eval_mode_offsets_out[active_output]);
   CeedScalar native_p1_basis_products[16][4][9];
 
-  if (native_p1_direct) {
-    for (CeedInt node_out = 0; node_out < 4; node_out++) {
-      for (CeedInt node_in = 0; node_in < 4; node_in++) {
-        const CeedInt node_pair = node_out * 4 + node_in;
-
-        for (CeedInt q = 0; q < 4; q++) {
-          for (CeedInt eval_out = 0; eval_out < 3; eval_out++) {
-            const CeedScalar b_out = B_mat_out[(q * 3 + eval_out) * 4 + node_out];
-
-            for (CeedInt eval_in = 0; eval_in < 3; eval_in++) {
-              native_p1_basis_products[node_pair][q][eval_out * 3 + eval_in] =
-                  b_out * B_mat_in[(q * 3 + eval_in) * 4 + node_in];
-            }
-          }
-        }
-      }
-    }
-  }
-  if (!impl->mapped_btd)
+  if (native_p1_direct) CeedOperatorBuildNativeP1BasisProducts_Opt(B_mat_in, B_mat_out, native_p1_basis_products);
+  if (!native_p1_direct && !impl->mapped_btd)
     CeedCallBackend(CeedCalloc((CeedSize)num_component_blocks * elem_size_out * btd_stride, &impl->mapped_btd));
-  if (!contract && !impl->mapped_btd_sum) CeedCallBackend(CeedCalloc(elem_size_out, &impl->mapped_btd_sum));
-  if (!impl->mapped_elem_mat)
+  if (!native_p1_direct && !contract && !impl->mapped_btd_sum) CeedCallBackend(CeedCalloc(elem_size_out, &impl->mapped_btd_sum));
+  if (!native_p1_direct && !impl->mapped_elem_mat)
     CeedCallBackend(CeedCalloc((CeedSize)num_component_blocks * elem_size_out * elem_size_in, &impl->mapped_elem_mat));
   if (!impl->mapped_qf_block) CeedCallBackend(CeedCalloc(qf_block_size, &impl->mapped_qf_block));
   BTD_mat  = impl->mapped_btd;
@@ -922,28 +964,18 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
   elem_mat = impl->mapped_elem_mat;
   qf_block = impl->mapped_qf_block;
   CeedCallBackend(CeedVectorGetArray(values, CEED_MEM_HOST, &vals));
-  if (timing_enabled) setup_time = CeedOperatorAssemblyTime_Opt() - total_start;
 
   CeedSize count = 0;
   for (CeedInt e_block = 0; e_block < num_elem; e_block += block_size) {
     CeedScalar *qf_write = qf_block;
 
-    if (timing_enabled) phase_start = CeedOperatorAssemblyTime_Opt();
-    CeedCallBackend(CeedOperatorInputBasis_Opt(e_block, Q, qf_input_fields, op_input_fields, num_input_fields, block_size, NULL, true, e_data, impl,
-                                               CEED_REQUEST_IMMEDIATE));
-    if (timing_enabled) {
-      const double phase_end = CeedOperatorAssemblyTime_Opt();
-
-      input_basis_time += phase_end - phase_start;
-      phase_start = phase_end;
-    }
-    if (timing_enabled) qfunction_start = CeedOperatorAssemblyTime_Opt();
+    CeedCallBackend(CeedOperatorInputBasis_Opt(e_block, Q, qf_input_fields, op_input_fields, num_input_fields, block_size, NULL, true, -1, e_data,
+                                               impl, CEED_REQUEST_IMMEDIATE));
     if (assembly_qf) {
       const CeedScalar *assembly_inputs[CEED_FIELD_MAX] = {NULL};
       CeedScalar       *assembly_outputs[1]             = {qf_block};
       void             *ctx_data                        = NULL;
 
-      if (timing_enabled) phase_start = CeedOperatorAssemblyTime_Opt();
       for (CeedInt i = 0; i < num_input_fields; i++) {
         CeedCallBackend(CeedVectorGetArrayRead(impl->q_vecs_in[i], CEED_MEM_HOST, &assembly_inputs[i]));
       }
@@ -954,7 +986,6 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
         CeedCallBackend(CeedVectorRestoreArrayRead(impl->q_vecs_in[i], &assembly_inputs[i]));
       }
       qf_write = qf_block + qf_block_size;
-      if (timing_enabled) qf_apply_time += CeedOperatorAssemblyTime_Opt() - phase_start;
     } else {
       for (CeedInt i = 0; i < num_input_fields; i++) {
         CeedInt    field_size;
@@ -968,13 +999,10 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
         for (CeedInt field = 0; field < field_size; field++) {
           CeedScalar *array;
 
-          if (timing_enabled) phase_start = CeedOperatorAssemblyTime_Opt();
           CeedCallBackend(CeedVectorGetArray(impl->q_vecs_in[i], CEED_MEM_HOST, &array));
           for (CeedInt j = 0; j < Q * block_size; j++) array[field * Q * block_size + j] = 1.0;
           CeedCallBackend(CeedVectorRestoreArray(impl->q_vecs_in[i], &array));
-          if (timing_enabled) qf_seed_time += CeedOperatorAssemblyTime_Opt() - phase_start;
           if (!impl->is_identity_qf) {
-            if (timing_enabled) phase_start = CeedOperatorAssemblyTime_Opt();
             for (CeedInt out = 0; out < num_output_fields; out++) {
               CeedInt    out_size;
               CeedVector out_vec;
@@ -987,15 +1015,7 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
               }
               CeedCallBackend(CeedVectorDestroy(&out_vec));
             }
-            if (timing_enabled) {
-              qf_bind_time += CeedOperatorAssemblyTime_Opt() - phase_start;
-              phase_start = CeedOperatorAssemblyTime_Opt();
-            }
             CeedCallBackend(CeedQFunctionApply(qf, Q * block_size, impl->q_vecs_in, impl->q_vecs_out));
-            if (timing_enabled) {
-              qf_apply_time += CeedOperatorAssemblyTime_Opt() - phase_start;
-              phase_start = CeedOperatorAssemblyTime_Opt();
-            }
             for (CeedInt out = 0; out < num_output_fields; out++) {
               CeedVector out_vec;
 
@@ -1003,7 +1023,6 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
               if (out_vec == CEED_VECTOR_ACTIVE) CeedCallBackend(CeedVectorTakeArray(impl->q_vecs_out[out], CEED_MEM_HOST, NULL));
               CeedCallBackend(CeedVectorDestroy(&out_vec));
             }
-            if (timing_enabled) qf_unbind_time += CeedOperatorAssemblyTime_Opt() - phase_start;
           } else {
             CeedInt           out_size;
             const CeedScalar *array_read;
@@ -1014,76 +1033,25 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
             CeedCallBackend(CeedVectorRestoreArrayRead(impl->q_vecs_out[0], &array_read));
             qf_write += out_size * Q * block_size;
           }
-          if (timing_enabled) phase_start = CeedOperatorAssemblyTime_Opt();
           CeedCallBackend(CeedVectorGetArray(impl->q_vecs_in[i], CEED_MEM_HOST, &array));
           for (CeedInt j = 0; j < Q * block_size; j++) array[field * Q * block_size + j] = 0.0;
           CeedCallBackend(CeedVectorRestoreArray(impl->q_vecs_in[i], &array));
-          if (timing_enabled) qf_reset_time += CeedOperatorAssemblyTime_Opt() - phase_start;
         }
       }
     }
     CeedCheck(qf_write == qf_block + qf_block_size, ceed, CEED_ERROR_BACKEND, "Incorrect fused QFunction assembly size");
-    if (timing_enabled) qfunction_time += CeedOperatorAssemblyTime_Opt() - qfunction_start;
-    bool native_p1_value_output_zero = native_p1_direct;
-    if (native_p1_direct) {
-      // With a separately assembled lumped pseudo-time mass, the complete
-      // value-output block is exactly zero. Detect that property rather than
-      // assuming it, preserving correctness for consistent-mass operators.
-      for (CeedInt col = 0; col < 4 && native_p1_value_output_zero; col++) {
-        for (CeedInt row = 0; row < 4 && native_p1_value_output_zero; row++) {
-          for (CeedInt point = 0; point < Q * block_size; point++) {
-            if (qf_block[((CeedSize)col * 12 + row) * Q * block_size + point] != 0.) {
-              native_p1_value_output_zero = false;
-              break;
-            }
-          }
-        }
-      }
-    }
+    // With separately assembled lumped pseudo-time mass the value-output block
+    // is zero. Detect that property so consistent-mass operators remain valid.
+    const bool native_p1_value_output_zero = native_p1_direct && CeedOperatorNativeP1ValueOutputIsZero_Opt(qf_block, Q, block_size);
 
     const CeedInt block_end = CeedIntMin(e_block + block_size, num_elem);
     for (CeedInt e = e_block; e < block_end; e++) {
       const CeedInt lane = e - e_block;
 
-      if (timing_enabled) phase_start = CeedOperatorAssemblyTime_Opt();
       const CeedInt num_eval_in = num_eval_modes_in[active_input], num_eval_out = num_eval_modes_out[active_output];
       if (native_p1_direct) {
-        // Native 2D P1 flow block: contract the complete 3x3 value/gradient
-        // coefficient block at each quadrature point directly into each 4x4
-        // nodal component block, then reduce immediately into the persistent
-        // compact destination. This removes BTD staging, the generic tensor
-        // contraction, and the temporary element-matrix stream.
-        for (CeedInt comp_in = 0; comp_in < 4; comp_in++) {
-          for (CeedInt comp_out = 0; comp_out < 4; comp_out++) {
-            CeedScalar entries[16] = {0.};
-            const CeedSize col_0 = comp_in, col_1 = 4 + comp_in, col_2 = 8 + comp_in;
-            const CeedSize row_0 = comp_out, row_1 = 4 + comp_out, row_2 = 8 + comp_out;
-
-            for (CeedInt q = 0; q < 4; q++) {
-              const CeedSize   point_index = (CeedSize)q * block_size + lane;
-              const CeedScalar coeff_00    = native_p1_value_output_zero
-                                                 ? 0.
-                                                 : qf_block[(col_0 * 12 + row_0) * Q * block_size + point_index];
-              const CeedScalar coeff_10 = qf_block[(col_0 * 12 + row_1) * Q * block_size + point_index];
-              const CeedScalar coeff_11 = qf_block[(col_1 * 12 + row_1) * Q * block_size + point_index];
-              const CeedScalar coeff_12 = qf_block[(col_2 * 12 + row_1) * Q * block_size + point_index];
-              const CeedScalar coeff_20 = qf_block[(col_0 * 12 + row_2) * Q * block_size + point_index];
-              const CeedScalar coeff_21 = qf_block[(col_1 * 12 + row_2) * Q * block_size + point_index];
-              const CeedScalar coeff_22 = qf_block[(col_2 * 12 + row_2) * Q * block_size + point_index];
-
-              CeedPragmaSIMD for (CeedInt node_pair = 0; node_pair < 16; node_pair++) {
-                const CeedScalar *basis_product = native_p1_basis_products[node_pair][q];
-
-                entries[node_pair] += basis_product[0] * coeff_00 + basis_product[3] * coeff_10 + basis_product[4] * coeff_11 +
-                                      basis_product[5] * coeff_12 + basis_product[6] * coeff_20 + basis_product[7] * coeff_21 +
-                                      basis_product[8] * coeff_22;
-              }
-            }
-            for (CeedInt node_pair = 0; node_pair < 16; node_pair++) {
-              vals[entry_map[offset + count++]] += entries[node_pair];
-            }
-          }
-        }
+        CeedOperatorAssembleNativeP1Mapped_Opt(qf_block, Q, block_size, lane, native_p1_value_output_zero, native_p1_basis_products, offset,
+                                               entry_map, &count, vals);
       } else {
         for (CeedInt comp_in = 0; comp_in < num_comp_in; comp_in++) {
           for (CeedInt comp_out = 0; comp_out < num_comp_out; comp_out++) {
@@ -1121,21 +1089,9 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
           }
         }
       }
-      if (timing_enabled) {
-        const double phase_end = CeedOperatorAssemblyTime_Opt();
-
-        btd_time += phase_end - phase_start;
-        phase_start = phase_end;
-      }
       if (contract && !native_p1_direct)
         CeedCallBackend(CeedTensorContractApply(contract, 1, btd_stride, elem_size_in, elem_size_out * num_component_blocks, BTD_mat, CEED_TRANSPOSE,
                                                 false, B_mat_in, elem_mat));
-      if (timing_enabled) {
-        const double phase_end = CeedOperatorAssemblyTime_Opt();
-
-        contract_time += phase_end - phase_start;
-        phase_start = phase_end;
-      }
       if (!native_p1_direct) {
         for (CeedInt component_block = 0; component_block < num_component_blocks; component_block++) {
           const CeedScalar *elem_component = &elem_mat[(CeedSize)component_block * elem_size_out * elem_size_in];
@@ -1145,7 +1101,6 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
           }
         }
       }
-      if (timing_enabled) scatter_time += CeedOperatorAssemblyTime_Opt() - phase_start;
     }
   }
 
@@ -1159,23 +1114,372 @@ static int CeedOperatorAssembleSingleBlockMapped_Opt(CeedOperator op, CeedSize o
     if (vec == CEED_VECTOR_ACTIVE) CeedCallBackend(CeedVectorSetValue(impl->q_vecs_out[out], 0.0));
     CeedCallBackend(CeedVectorDestroy(&vec));
   }
-  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, e_data, impl));
+  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_input_fields, qf_input_fields, op_input_fields, -1, e_data, impl));
   CeedCallBackend(CeedDestroy(&ceed));
   CeedCallBackend(CeedQFunctionDestroy(&qf));
-  if (timing_enabled) {
-    static unsigned long call_id      = 0;
-    const char          *rank_env     = getenv("OMPI_COMM_WORLD_RANK");
-    const int            rank         = rank_env ? atoi(rank_env) : -1;
-    const double         total_time   = CeedOperatorAssemblyTime_Opt() - total_start;
-    const double         cleanup_time = total_time - setup_time - input_basis_time - qfunction_time - btd_time - contract_time - scatter_time;
+  return CEED_ERROR_SUCCESS;
+}
 
-    fprintf(stderr,
-            "libCEED mapped assembly timing: rank=%d call=%lu elements=%" CeedInt_FMT " components=%" CeedInt_FMT
-            " setup=%.9f input_basis=%.9f qfunction=%.9f qf_seed=%.9f qf_bind=%.9f qf_apply=%.9f qf_unbind=%.9f qf_reset=%.9f"
-            " btd=%.9f contract=%.9f scatter=%.9f cleanup=%.9f total=%.9f\n",
-            rank, call_id++, num_elem, num_component_blocks, setup_time, input_basis_time, qfunction_time, qf_seed_time, qf_bind_time, qf_apply_time,
-            qf_unbind_time, qf_reset_time, btd_time, contract_time, scatter_time, cleanup_time, total_time);
+//------------------------------------------------------------------------------
+// Paired operator apply and mapped linear assembly
+//------------------------------------------------------------------------------
+static int CeedOperatorApplyAndLinearAssembleMapped_Opt(CeedOperator residual_op, CeedVector in_vec, CeedVector out_vec,
+                                                        CeedOperator jacobian_op, const CeedInt entry_map[], CeedVector values,
+                                                        bool apply_add, bool *is_supported) {
+  Ceed                     residual_ceed, jacobian_ceed;
+  Ceed_Opt                *residual_ceed_impl, *jacobian_ceed_impl;
+  CeedOperator_Opt        *residual_impl, *jacobian_impl;
+  CeedInt                  Q, jacobian_Q, num_elem, jacobian_num_elem;
+  CeedInt                  num_residual_inputs, num_residual_outputs, num_jacobian_inputs, num_jacobian_outputs;
+  CeedScalar              *residual_e_data[2 * CEED_FIELD_MAX] = {0}, *jacobian_e_data[2 * CEED_FIELD_MAX] = {0};
+  CeedQFunction            residual_qf, jacobian_qf;
+  CeedQFunctionUser        assembly_qf = NULL;
+  bool                     assembly_grad_in_value_out_zero;
+  CeedQFunctionField      *residual_qf_inputs, *residual_qf_outputs, *jacobian_qf_inputs, *jacobian_qf_outputs;
+  CeedOperatorField       *residual_inputs, *residual_outputs, *jacobian_inputs, *jacobian_outputs;
+  CeedOperatorAssemblyData data;
+  CeedInt                  num_active_bases_in, *num_eval_modes_in, num_active_bases_out, *num_eval_modes_out;
+  CeedSize                 num_output_components, **eval_mode_offsets_in, **eval_mode_offsets_out;
+  CeedBasis               *active_bases_in, *active_bases_out;
+  CeedElemRestriction     *active_rstrs_in, *active_rstrs_out;
+  const CeedScalar       **B_mats_in, **B_mats_out;
+  CeedInt                  residual_handoff = -1, jacobian_handoff = -1;
+
+  *is_supported = false;
+  CeedCallBackend(CeedOperatorGetCeed(residual_op, &residual_ceed));
+  CeedCallBackend(CeedOperatorGetCeed(jacobian_op, &jacobian_ceed));
+  CeedCallBackend(CeedGetData(residual_ceed, &residual_ceed_impl));
+  // A pair is only backend-local when both operators belong to the same Ceed
+  // instance. This also makes the following backend data access safe.
+  if (jacobian_ceed != residual_ceed) {
+    CeedCallBackend(CeedDestroy(&residual_ceed));
+    CeedCallBackend(CeedDestroy(&jacobian_ceed));
+    return CEED_ERROR_SUCCESS;
   }
+  CeedCallBackend(CeedGetData(jacobian_ceed, &jacobian_ceed_impl));
+  if (residual_ceed_impl->block_size != jacobian_ceed_impl->block_size) {
+    CeedCallBackend(CeedDestroy(&residual_ceed));
+    CeedCallBackend(CeedDestroy(&jacobian_ceed));
+    return CEED_ERROR_SUCCESS;
+  }
+  CeedCallBackend(CeedOperatorGetData(residual_op, &residual_impl));
+  CeedCallBackend(CeedOperatorGetData(jacobian_op, &jacobian_impl));
+  CeedCallBackend(CeedOperatorGetNumElements(residual_op, &num_elem));
+  CeedCallBackend(CeedOperatorGetNumElements(jacobian_op, &jacobian_num_elem));
+  CeedCallBackend(CeedOperatorGetNumQuadraturePoints(residual_op, &Q));
+  CeedCallBackend(CeedOperatorGetNumQuadraturePoints(jacobian_op, &jacobian_Q));
+  if (num_elem != jacobian_num_elem || Q != jacobian_Q) {
+    CeedCallBackend(CeedDestroy(&residual_ceed));
+    CeedCallBackend(CeedDestroy(&jacobian_ceed));
+    return CEED_ERROR_SUCCESS;
+  }
+  CeedCallBackend(CeedOperatorGetQFunction(residual_op, &residual_qf));
+  CeedCallBackend(CeedOperatorGetQFunction(jacobian_op, &jacobian_qf));
+  CeedCallBackend(CeedQFunctionGetAssemblyUserFunction(jacobian_qf, &assembly_qf));
+  CeedCallBackend(CeedQFunctionGetAssemblyDataGradientInputToValueOutputZero(jacobian_qf, &assembly_grad_in_value_out_zero));
+  if (!assembly_qf) goto unsupported;
+  CeedCallBackend(CeedOperatorGetFields(residual_op, &num_residual_inputs, &residual_inputs, &num_residual_outputs, &residual_outputs));
+  CeedCallBackend(CeedOperatorGetFields(jacobian_op, &num_jacobian_inputs, &jacobian_inputs, &num_jacobian_outputs, &jacobian_outputs));
+  CeedCallBackend(CeedQFunctionGetFields(residual_qf, NULL, &residual_qf_inputs, NULL, &residual_qf_outputs));
+  CeedCallBackend(CeedQFunctionGetFields(jacobian_qf, NULL, &jacobian_qf_inputs, NULL, &jacobian_qf_outputs));
+
+  // Locate one passive EVAL_NONE vector produced by the residual QFunction and
+  // consumed by the target assembly QFunction. Equality of the CeedVector
+  // handle is the explicit data-dependency contract between the two operators.
+  for (CeedInt i = 0; i < num_residual_outputs; i++) {
+    CeedEvalMode residual_mode;
+    CeedVector   residual_vec;
+
+    CeedCallBackend(CeedQFunctionFieldGetEvalMode(residual_qf_outputs[i], &residual_mode));
+    CeedCallBackend(CeedOperatorFieldGetVector(residual_outputs[i], &residual_vec));
+    if (residual_mode == CEED_EVAL_NONE && residual_vec != CEED_VECTOR_ACTIVE && residual_vec != CEED_VECTOR_NONE) {
+      for (CeedInt j = 0; j < num_jacobian_inputs; j++) {
+        CeedEvalMode        jacobian_mode;
+        CeedVector          jacobian_vec;
+        CeedElemRestriction residual_rstr, jacobian_rstr;
+        CeedInt             residual_size, jacobian_size;
+        bool                handoff_layout_safe = false;
+
+        CeedCallBackend(CeedQFunctionFieldGetEvalMode(jacobian_qf_inputs[j], &jacobian_mode));
+        CeedCallBackend(CeedOperatorFieldGetVector(jacobian_inputs[j], &jacobian_vec));
+        CeedCallBackend(CeedOperatorFieldGetElemRestriction(residual_outputs[i], &residual_rstr));
+        CeedCallBackend(CeedOperatorFieldGetElemRestriction(jacobian_inputs[j], &jacobian_rstr));
+        CeedCallBackend(CeedQFunctionFieldGetSize(residual_qf_outputs[i], &residual_size));
+        CeedCallBackend(CeedQFunctionFieldGetSize(jacobian_qf_inputs[j], &jacobian_size));
+        if (residual_rstr == jacobian_rstr) {
+          CeedRestrictionType handoff_rstr_type;
+          CeedInt             handoff_num_elem, handoff_elem_size, handoff_num_comp, handoff_strides[3];
+          bool                has_backend_strides;
+
+          CeedCallBackend(CeedElemRestrictionGetType(residual_rstr, &handoff_rstr_type));
+          if (handoff_rstr_type == CEED_RESTRICTION_STRIDED) {
+            CeedCallBackend(CeedElemRestrictionGetNumElements(residual_rstr, &handoff_num_elem));
+            CeedCallBackend(CeedElemRestrictionGetElementSize(residual_rstr, &handoff_elem_size));
+            CeedCallBackend(CeedElemRestrictionGetNumComponents(residual_rstr, &handoff_num_comp));
+            CeedCallBackend(CeedElemRestrictionHasBackendStrides(residual_rstr, &has_backend_strides));
+            CeedCallBackend(CeedElemRestrictionGetStrides(residual_rstr, handoff_strides));
+            handoff_layout_safe = handoff_num_elem == num_elem && handoff_elem_size == Q && handoff_num_comp == residual_size &&
+                                  (has_backend_strides || (handoff_strides[0] == 1 && handoff_strides[1] == Q &&
+                                                           handoff_strides[2] == Q * residual_size));
+          }
+        }
+        if (jacobian_mode == CEED_EVAL_NONE && residual_vec == jacobian_vec && residual_size == jacobian_size && handoff_layout_safe) {
+          if (residual_handoff >= 0) {
+            CeedCallBackend(CeedElemRestrictionDestroy(&residual_rstr));
+            CeedCallBackend(CeedElemRestrictionDestroy(&jacobian_rstr));
+            CeedCallBackend(CeedVectorDestroy(&jacobian_vec));
+            CeedCallBackend(CeedVectorDestroy(&residual_vec));
+            goto unsupported;
+          }
+          residual_handoff = i;
+          jacobian_handoff = j;
+        }
+        CeedCallBackend(CeedElemRestrictionDestroy(&residual_rstr));
+        CeedCallBackend(CeedElemRestrictionDestroy(&jacobian_rstr));
+        CeedCallBackend(CeedVectorDestroy(&jacobian_vec));
+      }
+    }
+    CeedCallBackend(CeedVectorDestroy(&residual_vec));
+  }
+  if (residual_handoff < 0) goto unsupported;
+
+  CeedCallBackend(CeedOperatorGetOperatorAssemblyData(jacobian_op, &data));
+  CeedCallBackend(CeedOperatorAssemblyDataGetEvalModes(data, &num_active_bases_in, &num_eval_modes_in, NULL, &eval_mode_offsets_in,
+                                                       &num_active_bases_out, &num_eval_modes_out, NULL, &eval_mode_offsets_out,
+                                                       &num_output_components));
+  CeedCallBackend(CeedOperatorAssemblyDataGetBases(data, NULL, &active_bases_in, &B_mats_in, NULL, &active_bases_out, &B_mats_out));
+  CeedCallBackend(CeedOperatorAssemblyDataGetElemRestrictions(data, NULL, &active_rstrs_in, NULL, &active_rstrs_out));
+  if (num_active_bases_in != 1 || num_active_bases_out != 1) goto unsupported;
+
+  CeedElemRestriction elem_rstr_in = active_rstrs_in[0], elem_rstr_out = active_rstrs_out[0];
+  CeedRestrictionType rstr_type_in, rstr_type_out;
+  CeedInt             num_elem_in, elem_size_in, num_comp_in, num_elem_out, elem_size_out, num_comp_out;
+  CeedTensorContract  contract;
+
+  CeedCallBackend(CeedElemRestrictionGetType(elem_rstr_in, &rstr_type_in));
+  CeedCallBackend(CeedElemRestrictionGetType(elem_rstr_out, &rstr_type_out));
+  if (rstr_type_in != CEED_RESTRICTION_STANDARD || rstr_type_out != CEED_RESTRICTION_STANDARD) goto unsupported;
+  CeedCallBackend(CeedElemRestrictionGetNumElements(elem_rstr_in, &num_elem_in));
+  CeedCallBackend(CeedElemRestrictionGetElementSize(elem_rstr_in, &elem_size_in));
+  CeedCallBackend(CeedElemRestrictionGetNumComponents(elem_rstr_in, &num_comp_in));
+  CeedCallBackend(CeedElemRestrictionGetNumElements(elem_rstr_out, &num_elem_out));
+  CeedCallBackend(CeedElemRestrictionGetElementSize(elem_rstr_out, &elem_size_out));
+  CeedCallBackend(CeedElemRestrictionGetNumComponents(elem_rstr_out, &num_comp_out));
+  if (num_elem_in != num_elem_out || num_elem_in != num_elem) goto unsupported;
+  CeedCallBackend(CeedBasisGetTensorContract(active_bases_in[0], &contract));
+
+  CeedInt qf_size_in = 0, qf_size_out = 0;
+
+  for (CeedInt i = 0; i < num_jacobian_inputs; i++) {
+    CeedInt    field_size;
+    CeedVector vec;
+
+    CeedCallBackend(CeedOperatorFieldGetVector(jacobian_inputs[i], &vec));
+    if (vec == CEED_VECTOR_ACTIVE) {
+      CeedCallBackend(CeedQFunctionFieldGetSize(jacobian_qf_inputs[i], &field_size));
+      qf_size_in += field_size;
+    }
+    CeedCallBackend(CeedVectorDestroy(&vec));
+  }
+  for (CeedInt i = 0; i < num_jacobian_outputs; i++) {
+    CeedInt    field_size;
+    CeedVector vec;
+
+    CeedCallBackend(CeedOperatorFieldGetVector(jacobian_outputs[i], &vec));
+    if (vec == CEED_VECTOR_ACTIVE) {
+      CeedCallBackend(CeedQFunctionFieldGetSize(jacobian_qf_outputs[i], &field_size));
+      qf_size_out += field_size;
+    }
+    CeedCallBackend(CeedVectorDestroy(&vec));
+  }
+  if (!qf_size_in || !qf_size_out || out_vec == CEED_VECTOR_NONE || in_vec == CEED_VECTOR_NONE) goto unsupported;
+
+  const CeedInt     block_size           = residual_ceed_impl->block_size;
+  const CeedInt     num_component_blocks = num_comp_in * num_comp_out;
+  const CeedSize    btd_stride            = Q * num_eval_modes_in[0];
+  const CeedSize    qf_block_size         = (CeedSize)qf_size_in * qf_size_out * Q * block_size;
+  const CeedScalar *B_mat_in              = B_mats_in[0], *B_mat_out = B_mats_out[0];
+  CeedScalar       *qf_block, *BTD_mat, *BTD_sum = NULL, *elem_mat, *vals = NULL;
+  bool              residual_skip_out[CEED_FIELD_MAX] = {false};
+  const bool native_p1_direct = CeedOperatorCanUseNativeP1Assembly_Opt(
+      assembly_qf, assembly_grad_in_value_out_zero, contract, num_comp_in, num_comp_out, elem_size_in, elem_size_out, Q, qf_size_in, qf_size_out,
+      num_eval_modes_in[0], num_eval_modes_out[0], eval_mode_offsets_in[0], eval_mode_offsets_out[0]);
+  CeedScalar native_p1_basis_products[16][4][9];
+
+  if (native_p1_direct) CeedOperatorBuildNativeP1BasisProducts_Opt(B_mat_in, B_mat_out, native_p1_basis_products);
+
+  *is_supported = true;
+  CeedDebug(residual_ceed, "\nUsing optimized paired residual and mapped assembly path\n");
+  if (native_p1_direct) CeedDebug(residual_ceed, "\nUsing optimized paired native 2D P1 contraction\n");
+  // Do not mutate public vectors while probing support. A standard pair clears
+  // its destinations here; an aligned composite clears them once before
+  // calling supported children with additive semantics.
+  if (!apply_add) {
+    CeedCallBackend(CeedVectorSetValue(out_vec, 0.0));
+    CeedCallBackend(CeedVectorSetValue(values, 0.0));
+  }
+  CeedCallBackend(CeedOperatorSetup_Opt(residual_op));
+  CeedCallBackend(CeedOperatorSetup_Opt(jacobian_op));
+  CeedCallBackend(CeedOperatorSetupInputs_Opt(num_residual_inputs, residual_qf_inputs, residual_inputs, -1, in_vec, residual_e_data, residual_impl,
+                                              CEED_REQUEST_IMMEDIATE));
+  // The shared passive input comes directly from the residual's block-local
+  // Q-vector. Do not restrict stale global data or rebind the target Q-vector;
+  // this also leaves its input-state cache valid for the next ordinary call.
+  CeedCallBackend(CeedOperatorSetupInputs_Opt(num_jacobian_inputs, jacobian_qf_inputs, jacobian_inputs, jacobian_handoff, NULL, jacobian_e_data,
+                                              jacobian_impl, CEED_REQUEST_IMMEDIATE));
+  for (CeedInt i = 0; i < num_residual_outputs; i++) {
+    CeedEvalMode eval_mode;
+
+    residual_skip_out[i] = residual_impl->skip_rstr_out[i];
+    CeedCallBackend(CeedQFunctionFieldGetEvalMode(residual_qf_outputs[i], &eval_mode));
+    if (eval_mode == CEED_EVAL_NONE) {
+      CeedScalar *array;
+
+      CeedCallBackend(CeedVectorGetArrayWrite(residual_impl->e_vecs_out[i], CEED_MEM_HOST, &array));
+      CeedCallBackend(CeedVectorSetArray(residual_impl->q_vecs_out[i], CEED_MEM_HOST, CEED_USE_POINTER, array));
+      CeedCallBackend(CeedVectorRestoreArray(residual_impl->e_vecs_out[i], &array));
+    }
+  }
+  if (!apply_add) {
+    // Output restriction is additive across blocks. Match Apply semantics by
+    // clearing every passive output, including the shared handoff, once before
+    // the traversal. Composite callers already cleared all passive outputs.
+    for (CeedInt i = 0; i < num_residual_outputs; i++) {
+      CeedVector vec;
+
+      CeedCallBackend(CeedOperatorFieldGetVector(residual_outputs[i], &vec));
+      if (vec != CEED_VECTOR_ACTIVE && vec != CEED_VECTOR_NONE) CeedCallBackend(CeedVectorSetValue(vec, 0.0));
+      CeedCallBackend(CeedVectorDestroy(&vec));
+    }
+  }
+  for (CeedInt i = 0; i < num_jacobian_inputs; i++) {
+    CeedVector vec;
+
+    CeedCallBackend(CeedOperatorFieldGetVector(jacobian_inputs[i], &vec));
+    if (vec == CEED_VECTOR_ACTIVE) CeedCallBackend(CeedVectorSetValue(jacobian_impl->q_vecs_in[i], 0.0));
+    CeedCallBackend(CeedVectorDestroy(&vec));
+  }
+  // These workspaces have the same immutable shape as the target operator's
+  // direct mapped-assembly workspaces. Reuse them across calls instead of
+  // allocating and clearing three arrays on every nonlinear stage.
+  if (!jacobian_impl->mapped_qf_block) CeedCallBackend(CeedMalloc(qf_block_size, &jacobian_impl->mapped_qf_block));
+  if (!native_p1_direct && !jacobian_impl->mapped_btd)
+    CeedCallBackend(CeedMalloc((CeedSize)num_component_blocks * elem_size_out * btd_stride, &jacobian_impl->mapped_btd));
+  if (!native_p1_direct && !contract && !jacobian_impl->mapped_btd_sum) CeedCallBackend(CeedMalloc(elem_size_out, &jacobian_impl->mapped_btd_sum));
+  if (!native_p1_direct && !jacobian_impl->mapped_elem_mat)
+    CeedCallBackend(CeedMalloc((CeedSize)num_component_blocks * elem_size_out * elem_size_in, &jacobian_impl->mapped_elem_mat));
+  qf_block = jacobian_impl->mapped_qf_block;
+  BTD_mat  = jacobian_impl->mapped_btd;
+  BTD_sum  = jacobian_impl->mapped_btd_sum;
+  elem_mat = jacobian_impl->mapped_elem_mat;
+  CeedCallBackend(CeedVectorGetArray(values, CEED_MEM_HOST, &vals));
+
+  CeedSize count = 0;
+  for (CeedInt e_block = 0; e_block < num_elem; e_block += block_size) {
+    const CeedScalar *handoff_array = NULL;
+    const CeedScalar *assembly_inputs[CEED_FIELD_MAX] = {NULL};
+    CeedScalar       *assembly_outputs[1]             = {qf_block};
+    void             *ctx_data                        = NULL;
+
+    CeedCallBackend(CeedOperatorInputBasis_Opt(e_block, Q, residual_qf_inputs, residual_inputs, num_residual_inputs, block_size, in_vec, false, -1,
+                                               residual_e_data, residual_impl, CEED_REQUEST_IMMEDIATE));
+    CeedCallBackend(CeedQFunctionApply(residual_qf, Q * block_size, residual_impl->q_vecs_in, residual_impl->q_vecs_out));
+    CeedCallBackend(CeedOperatorOutputBasis_Opt(e_block, Q, residual_qf_outputs, residual_outputs, block_size, num_residual_inputs,
+                                                num_residual_outputs, residual_impl->apply_add_basis_out, residual_skip_out, residual_op, out_vec,
+                                                residual_impl, CEED_REQUEST_IMMEDIATE));
+
+    CeedCallBackend(CeedOperatorInputBasis_Opt(e_block, Q, jacobian_qf_inputs, jacobian_inputs, num_jacobian_inputs, block_size, NULL, true,
+                                               jacobian_handoff, jacobian_e_data, jacobian_impl, CEED_REQUEST_IMMEDIATE));
+    CeedCallBackend(CeedVectorGetArrayRead(residual_impl->q_vecs_out[residual_handoff], CEED_MEM_HOST, &handoff_array));
+    for (CeedInt i = 0; i < num_jacobian_inputs; i++) {
+      if (i == jacobian_handoff) assembly_inputs[i] = handoff_array;
+      else CeedCallBackend(CeedVectorGetArrayRead(jacobian_impl->q_vecs_in[i], CEED_MEM_HOST, &assembly_inputs[i]));
+    }
+    CeedCallBackend(CeedQFunctionGetContextData(jacobian_qf, CEED_MEM_HOST, &ctx_data));
+    CeedCallBackend(assembly_qf(ctx_data, Q * block_size, assembly_inputs, assembly_outputs));
+    CeedCallBackend(CeedQFunctionRestoreContextData(jacobian_qf, &ctx_data));
+    for (CeedInt i = 0; i < num_jacobian_inputs; i++) {
+      if (i != jacobian_handoff) CeedCallBackend(CeedVectorRestoreArrayRead(jacobian_impl->q_vecs_in[i], &assembly_inputs[i]));
+    }
+    CeedCallBackend(CeedVectorRestoreArrayRead(residual_impl->q_vecs_out[residual_handoff], &handoff_array));
+
+    const bool native_p1_value_output_zero = native_p1_direct && CeedOperatorNativeP1ValueOutputIsZero_Opt(qf_block, Q, block_size);
+
+    const CeedInt block_end = CeedIntMin(e_block + block_size, num_elem);
+    for (CeedInt e = e_block; e < block_end; e++) {
+      const CeedInt lane         = e - e_block;
+      const CeedInt num_eval_in  = num_eval_modes_in[0];
+      const CeedInt num_eval_out = num_eval_modes_out[0];
+
+      if (native_p1_direct) {
+        CeedOperatorAssembleNativeP1Mapped_Opt(qf_block, Q, block_size, lane, native_p1_value_output_zero, native_p1_basis_products, 0, entry_map,
+                                               &count, vals);
+      } else {
+        for (CeedInt comp_in = 0; comp_in < num_comp_in; comp_in++) {
+          for (CeedInt comp_out = 0; comp_out < num_comp_out; comp_out++) {
+            const CeedInt component_block = comp_in * num_comp_out + comp_out;
+            CeedScalar   *BTD_component = &BTD_mat[(CeedSize)component_block * elem_size_out * btd_stride];
+
+            for (CeedInt q = 0; q < Q; q++) {
+              for (CeedInt e_in = 0; e_in < num_eval_in; e_in++) {
+                const CeedSize row_offset = eval_mode_offsets_in[0][e_in] + comp_in;
+                CeedScalar    *btd_values = contract ? &BTD_mat[((CeedSize)q * num_eval_in + e_in) * elem_size_out * num_component_blocks +
+                                                                 (CeedSize)component_block * elem_size_out]
+                                                      : BTD_sum;
+
+                for (CeedInt e_out = 0; e_out < num_eval_out; e_out++) {
+                  const CeedSize eval_mode_index = row_offset * num_output_components + eval_mode_offsets_out[0][e_out] + comp_out;
+                  const CeedSize point_index     = (CeedSize)q * block_size + lane;
+                  const CeedScalar qf_value      = qf_block[eval_mode_index * Q * block_size + point_index];
+                  const CeedScalar *b_out        = &B_mat_out[(q * num_eval_out + e_out) * elem_size_out];
+
+                  if (!e_out) {
+                    CeedPragmaSIMD for (CeedInt n = 0; n < elem_size_out; n++) btd_values[n] = b_out[n] * qf_value;
+                  } else {
+                    CeedPragmaSIMD for (CeedInt n = 0; n < elem_size_out; n++) btd_values[n] += b_out[n] * qf_value;
+                  }
+                }
+                if (!contract) {
+                  for (CeedInt n = 0; n < elem_size_out; n++) BTD_component[n * btd_stride + q * num_eval_in + e_in] = BTD_sum[n];
+                }
+              }
+            }
+            if (!contract)
+              CeedCallBackend(CeedMatrixMatrixMultiply(residual_ceed, BTD_component, B_mat_in,
+                                                       &elem_mat[(CeedSize)component_block * elem_size_out * elem_size_in], elem_size_out,
+                                                       elem_size_in, btd_stride));
+          }
+        }
+        if (contract)
+          CeedCallBackend(CeedTensorContractApply(contract, 1, btd_stride, elem_size_in, elem_size_out * num_component_blocks, BTD_mat,
+                                                  CEED_TRANSPOSE, false, B_mat_in, elem_mat));
+        for (CeedInt component_block = 0; component_block < num_component_blocks; component_block++) {
+          const CeedScalar *elem_component = &elem_mat[(CeedSize)component_block * elem_size_out * elem_size_in];
+
+          for (CeedInt i = 0; i < elem_size_out; i++) {
+            for (CeedInt j = 0; j < elem_size_in; j++) vals[entry_map[count++]] += elem_component[i * elem_size_in + j];
+          }
+        }
+      }
+    }
+  }
+  CeedCheck(count == (CeedSize)elem_size_out * num_comp_out * elem_size_in * num_comp_in * num_elem, residual_ceed, CEED_ERROR_BACKEND,
+            "Error computing paired mapped entries");
+  CeedCallBackend(CeedVectorRestoreArray(values, &vals));
+  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_residual_inputs, residual_qf_inputs, residual_inputs, -1, residual_e_data, residual_impl));
+  CeedCallBackend(CeedOperatorRestoreInputs_Opt(num_jacobian_inputs, jacobian_qf_inputs, jacobian_inputs, jacobian_handoff, jacobian_e_data,
+                                                jacobian_impl));
+  CeedCallBackend(CeedDestroy(&residual_ceed));
+  CeedCallBackend(CeedDestroy(&jacobian_ceed));
+  CeedCallBackend(CeedQFunctionDestroy(&residual_qf));
+  CeedCallBackend(CeedQFunctionDestroy(&jacobian_qf));
+  return CEED_ERROR_SUCCESS;
+
+unsupported:
+  CeedCallBackend(CeedDestroy(&residual_ceed));
+  CeedCallBackend(CeedDestroy(&jacobian_ceed));
+  CeedCallBackend(CeedQFunctionDestroy(&residual_qf));
+  CeedCallBackend(CeedQFunctionDestroy(&jacobian_qf));
   return CEED_ERROR_SUCCESS;
 }
 
@@ -1257,6 +1561,8 @@ int CeedOperatorCreate_Opt(CeedOperator op) {
   CeedCallBackend(CeedSetBackendFunction(ceed, "Operator", op, "LinearAssembleQFunction", CeedOperatorLinearAssembleQFunction_Opt));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Operator", op, "LinearAssembleQFunctionUpdate", CeedOperatorLinearAssembleQFunctionUpdate_Opt));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Operator", op, "LinearAssembleSingleBlockMapped", CeedOperatorAssembleSingleBlockMapped_Opt));
+  CeedCallBackend(
+      CeedSetBackendFunction(ceed, "Operator", op, "ApplyAndLinearAssembleMapped", CeedOperatorApplyAndLinearAssembleMapped_Opt));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Operator", op, "ApplyAdd", CeedOperatorApplyAdd_Opt));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Operator", op, "Destroy", CeedOperatorDestroy_Opt));
   CeedCallBackend(CeedDestroy(&ceed));

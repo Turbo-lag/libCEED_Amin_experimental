@@ -365,6 +365,7 @@ struct CeedOperator_private {
   int (*LinearAssembleSingle)(CeedOperator, CeedInt, CeedVector);
   int (*LinearAssembleSingleBlock)(CeedOperator, CeedInt, CeedInt, CeedInt, CeedVector);
   int (*LinearAssembleSingleBlockMapped)(CeedOperator, CeedSize, CeedInt, CeedInt, CeedVector, const CeedInt *, bool *);
+  int (*ApplyAndLinearAssembleMapped)(CeedOperator, CeedVector, CeedVector, CeedOperator, const CeedInt *, CeedVector, bool, bool *);
   int (*CreateFDMElementInverse)(CeedOperator, CeedOperator *, CeedRequest *);
   int (*Apply)(CeedOperator, CeedVector, CeedVector, CeedRequest *);
   int (*ApplyComposite)(CeedOperator, CeedVector, CeedVector, CeedRequest *);
