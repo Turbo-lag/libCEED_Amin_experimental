@@ -25,7 +25,7 @@
 #ifndef CEED_QFUNCTION_ATTR
 #ifndef __NO_INLINE__
 #if defined(__GNUC__) || defined(__clang__)
-#define CEED_QFUNCTION_ATTR __attribute__((flatten))
+#define CEED_QFUNCTION_ATTR __attribute__((flatten, unused))
 #elif defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
 #define CEED_QFUNCTION_ATTR _Pragma("forceinline")
 #else
