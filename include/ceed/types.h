@@ -22,10 +22,17 @@
     The `inline` declaration does not necessarily enforce a compiler to inline a function.
     This can be detrimental to performance, so here we force inlining to occur unless inlining has been forced off (like during debugging).
 **/
+#ifndef CEED_QFUNCTION_UNUSED_ATTR
+#if defined(__GNUC__) || defined(__clang__)
+#define CEED_QFUNCTION_UNUSED_ATTR __attribute__((unused))
+#else
+#define CEED_QFUNCTION_UNUSED_ATTR
+#endif
+#endif
 #ifndef CEED_QFUNCTION_ATTR
 #ifndef __NO_INLINE__
 #if defined(__GNUC__) || defined(__clang__)
-#define CEED_QFUNCTION_ATTR __attribute__((flatten, unused))
+#define CEED_QFUNCTION_ATTR __attribute__((flatten))
 #elif defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
 #define CEED_QFUNCTION_ATTR _Pragma("forceinline")
 #else
@@ -35,7 +42,7 @@
 #define CEED_QFUNCTION_ATTR
 #endif
 #if defined(__GNUC__) || defined(__clang__)
-#define CEED_QFUNCTION_HELPER_ATTR CEED_QFUNCTION_ATTR __attribute__((always_inline))
+#define CEED_QFUNCTION_HELPER_ATTR CEED_QFUNCTION_UNUSED_ATTR CEED_QFUNCTION_ATTR __attribute__((always_inline))
 #else
 #define CEED_QFUNCTION_HELPER_ATTR CEED_QFUNCTION_ATTR
 #endif
@@ -47,9 +54,9 @@
 backends. It also creates a variable `name_loc` populated with the correct source path for creating the respective User QFunction.
 **/
 #ifndef CEED_QFUNCTION
-#define CEED_QFUNCTION(name)                                        \
-  static const char              name##_loc[] = __FILE__ ":" #name; \
-  CEED_QFUNCTION_ATTR static int name
+#define CEED_QFUNCTION(name)                                                                   \
+  static const char              name##_loc[] CEED_QFUNCTION_UNUSED_ATTR = __FILE__ ":" #name; \
+  CEED_QFUNCTION_UNUSED_ATTR CEED_QFUNCTION_ATTR static int name
 #endif
 
 /**
